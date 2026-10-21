@@ -1,0 +1,102 @@
+import { Router } from 'express'
+
+import {
+  REPORT_CATEGORIES,
+  REPORT_PRIORITIES,
+  REPORT_STATUSES,
+  SLA_DUE_SOON_DAYS,
+  STAFF_ROLES,
+} from '../constants.js'
+import { query } from '../db.js'
+import { requireRoles } from '../middleware/auth.js'
+
+const router = Router()
+
+function withZeroCounts(values, rows, key) {
+  const counts = new Map(rows.map((row) => [row[key], Number(row.count)]))
+
+  return values.map((value) => ({
+    [key]: value,
+    count: counts.get(value) ?? 0,
+  }))
+}
+
+router.get('/', requireRoles(...STAFF_ROLES), async (_request, response) => {
+  const [
+    totalsResult,
+    statusResult,
+    priorityResult,
+    categoryResult,
+    departmentResult,
+  ] = await Promise.all([
+    query(
+      `SELECT
+         (SELECT COUNT(*) FROM reports)::int AS total_reports,
+         (SELECT COUNT(*) FROM users)::int AS total_users,
+         (SELECT COUNT(*) FROM departments)::int AS total_departments,
+         (SELECT COUNT(*) FROM reports WHERE is_overdue = true)::int AS overdue_reports,
+         (SELECT COUNT(*) FROM reports
+          WHERE status <> 'Resolved'
+            AND sla_deadline IS NOT NULL
+            AND sla_deadline >= now()
+            AND sla_deadline <= now() + make_interval(days => $1))::int AS sla_due_soon,
+         (SELECT COUNT(*) FROM reports WHERE status = 'Resolved')::int AS resolved_reports`,
+      [SLA_DUE_SOON_DAYS],
+    ),
+    query(
+      `SELECT status, COUNT(*)::int AS count
+       FROM reports
+       GROUP BY status`,
+    ),
+    query(
+      `SELECT priority, COUNT(*)::int AS count
+       FROM reports
+       GROUP BY priority`,
+    ),
+    query(
+      `SELECT category, COUNT(*)::int AS count
+       FROM reports
+       GROUP BY category`,
+    ),
+    query(
+      `SELECT
+         department.id::text AS id,
+         department.name,
+         COUNT(report.id)::int AS count,
+         COUNT(report.id) FILTER (WHERE report.status <> 'Resolved')::int AS open_count,
+         COUNT(report.id) FILTER (WHERE report.status = 'Resolved')::int AS resolved_count
+       FROM departments department
+       LEFT JOIN reports report ON report.department_id = department.id
+       GROUP BY department.id, department.name
+       ORDER BY department.name ASC`,
+    ),
+  ])
+
+  const totals = totalsResult.rows[0]
+
+  response.json({
+    data: {
+      totals: {
+        totalReports: totals.total_reports,
+        totalUsers: totals.total_users,
+        totalDepartments: totals.total_departments,
+        openReports: totals.total_reports - totals.resolved_reports,
+        resolvedReports: totals.resolved_reports,
+        overdueReports: totals.overdue_reports,
+        slaDueSoon: totals.sla_due_soon,
+      },
+      byStatus: withZeroCounts(REPORT_STATUSES, statusResult.rows, 'status'),
+      byPriority: withZeroCounts(REPORT_PRIORITIES, priorityResult.rows, 'priority'),
+      byCategory: withZeroCounts(REPORT_CATEGORIES, categoryResult.rows, 'category'),
+      byDepartment: departmentResult.rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        count: Number(row.count),
+        openCount: Number(row.open_count),
+        resolvedCount: Number(row.resolved_count),
+      })),
+    },
+  })
+})
+
+export default router
