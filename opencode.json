@@ -1,0 +1,11 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [
+    "docs/PROJECT_SPEC.md",
+    ".github/copilot-instructions.md"
+  ],
+  "permission": {
+    "edit": "ask",
+    "bash": "ask"
+  }
+}
