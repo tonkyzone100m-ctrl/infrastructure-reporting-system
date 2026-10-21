@@ -72,6 +72,26 @@ function Navbar() {
 
             <li className="nav-item">
               <NavLink
+                to="/about"
+                className={linkClass}
+                onClick={() => setMenuOpen(false)}
+              >
+                About
+              </NavLink>
+            </li>
+
+            <li className="nav-item">
+              <NavLink
+                to="/contact"
+                className={linkClass}
+                onClick={() => setMenuOpen(false)}
+              >
+                Contact
+              </NavLink>
+            </li>
+
+            <li className="nav-item">
+              <NavLink
                 to="/my-reports"
                 className={linkClass}
                 onClick={() => setMenuOpen(false)}
@@ -89,6 +109,18 @@ function Navbar() {
                 Profile
               </NavLink>
             </li>
+
+            {!user && (
+              <li className="nav-item">
+                <NavLink
+                  to="/admin/login"
+                  className="nav-link px-lg-3 small text-muted"
+                  onClick={() => setMenuOpen(false)}
+                >
+                  Admin
+                </NavLink>
+              </li>
+            )}
 
             <li className="nav-item ms-lg-2 mt-2 mt-lg-0">
               {user ? (
