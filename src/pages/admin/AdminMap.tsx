@@ -1,1009 +1,409 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
+import L from 'leaflet'
 import {
   MapContainer,
-  Marker,
-  Popup,
   TileLayer,
   useMap,
 } from 'react-leaflet'
-import L from 'leaflet'
-import { Link } from 'react-router-dom'
+import 'leaflet.markercluster'
+import 'leaflet.markercluster/dist/MarkerCluster.css'
+import 'leaflet.markercluster/dist/MarkerCluster.Default.css'
 
-import { getReportsFromApi } from '../../services/apiClient'
+import {
+  EmptyState,
+  ErrorNotice,
+  PageHeading,
+  PanelHeading,
+  PriorityBadge,
+  SkeletonPanel,
+  StatusBadge,
+  formatRelative,
+} from '../../components/admin/AdminUi'
+import {
+  getAllReports,
+  getDepartments,
+} from '../../services/adminApi'
+import {
+  REPORT_CATEGORIES,
+  REPORT_PRIORITIES,
+  REPORT_STATUSES,
+  type DepartmentRecord,
+  type ReportSummary,
+} from '../../types/adminPanel'
 
-import type {
-  Report,
-  ReportPriority,
-} from '../../types/report'
+const DEFAULT_CENTER: [number, number] = [-1.9441, 30.0619]
 
-/*
- * ============================================================
- * LEAFLET DEFAULT MARKER
- * ============================================================
- */
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;')
+}
 
-const defaultIcon = L.icon({
-  iconUrl:
-    'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
+function markerClass(report: ReportSummary): string {
+  if (report.isOverdue) {
+    return 'overdue'
+  }
 
-  iconRetinaUrl:
-    'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
+  if (report.priority === 'Critical' || report.priority === 'High') {
+    return 'urgent'
+  }
 
-  shadowUrl:
-    'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+  if (report.status === 'Resolved') {
+    return 'resolved'
+  }
 
-  iconSize: [25, 41],
-  iconAnchor: [12, 41],
-  popupAnchor: [1, -34],
-  shadowSize: [41, 41],
-})
+  return 'open'
+}
 
-/*
- * ============================================================
- * KIGALI CENTER
- * ============================================================
- */
+function popupHtml(report: ReportSummary): string {
+  return `
+    <div class="admin-map-popup">
+      <span class="admin-map-popup-ref">${escapeHtml(report.reference)}</span>
+      <b>${escapeHtml(report.title)}</b>
+      <small>${escapeHtml(report.category)} · ${escapeHtml(report.status)}</small>
+      <div class="admin-map-popup-actions">
+        <span>${escapeHtml(report.department?.name ?? 'Unassigned')}</span>
+        <a href="/admin/reports/${encodeURIComponent(report.reference)}">Open report</a>
+      </div>
+    </div>
+  `
+}
 
-const KIGALI_CENTER: [number, number] = [
-  -1.9441,
-  30.0619,
-]
-
-/*
- * ============================================================
- * MAP CONTROLLER
- * ============================================================
- */
-
-function MapController({
-  report,
+function ClusterLayer({
+  reports,
+  selectedReference,
+  onSelect,
 }: {
-  report: Report | null
+  reports: ReportSummary[]
+  selectedReference: string
+  onSelect: (reference: string) => void
 }) {
   const map = useMap()
 
   useEffect(() => {
-    if (
-      !report ||
-      report.latitude === null ||
-      report.longitude === null
-    ) {
-      return
+    const clusterGroup = L.markerClusterGroup({
+      showCoverageOnHover: false,
+      maxClusterRadius: 46,
+      spiderfyOnMaxZoom: true,
+      iconCreateFunction: (cluster) => L.divIcon({
+        html: `<span>${cluster.getChildCount()}</span>`,
+        className: 'admin-map-cluster',
+        iconSize: L.point(36, 36),
+      }),
+    })
+    const markers = new Map<string, L.Marker>()
+
+    reports.forEach((report) => {
+      if (report.latitude === null || report.longitude === null) {
+        return
+      }
+
+      const marker = L.marker([report.latitude, report.longitude], {
+        icon: L.divIcon({
+          html: '<span></span>',
+          className: `admin-map-marker ${markerClass(report)}`,
+          iconSize: L.point(22, 22),
+          iconAnchor: L.point(11, 11),
+          popupAnchor: L.point(0, -10),
+        }),
+        title: `${report.reference} · ${report.title}`,
+      })
+
+      marker.bindPopup(popupHtml(report), {
+        className: 'admin-map-popup-wrap',
+        closeButton: true,
+        maxWidth: 280,
+      })
+      marker.on('click', () => onSelect(report.reference))
+      clusterGroup.addLayer(marker)
+      markers.set(report.reference, marker)
+    })
+
+    map.addLayer(clusterGroup)
+    map.invalidateSize()
+
+    const bounds = L.latLngBounds(
+      reports
+        .filter((report) => report.latitude !== null && report.longitude !== null)
+        .map((report) => [report.latitude as number, report.longitude as number]),
+    )
+
+    if (bounds.isValid()) {
+      map.fitBounds(bounds, { padding: [45, 45], maxZoom: 13 })
     }
 
-    map.flyTo(
-      [
-        report.latitude,
-        report.longitude,
-      ],
-      15,
-      {
-        duration: 0.8,
-      },
-    )
-  }, [map, report])
+    if (selectedReference) {
+      const marker = markers.get(selectedReference)
+
+      if (marker) {
+        window.setTimeout(() => {
+          map.setView(marker.getLatLng(), 15, { animate: true })
+          marker.openPopup()
+        }, 120)
+      }
+    }
+
+    return () => {
+      map.removeLayer(clusterGroup)
+    }
+  }, [map, onSelect, reports, selectedReference])
 
   return null
 }
 
-/*
- * ============================================================
- * PRIORITY BADGE
- * ============================================================
- */
-
-function getPriorityClass(
-  priority: ReportPriority,
-): string {
-  switch (priority) {
-    case 'Critical':
-      return 'danger'
-
-    case 'High':
-      return 'warning'
-
-    case 'Medium':
-      return 'primary'
-
-    case 'Low':
-      return 'secondary'
-
-    default:
-      return 'secondary'
-  }
-}
-
-/*
- * ============================================================
- * DATE FORMATTER
- * ============================================================
- */
-
-function formatDate(
-  date: string,
-): string {
-  const parsedDate = new Date(date)
-
-  if (
-    Number.isNaN(
-      parsedDate.getTime(),
-    )
-  ) {
-    return 'Date unavailable'
-  }
-
-  return parsedDate.toLocaleDateString(
-    undefined,
-    {
-      dateStyle: 'medium',
-    },
-  )
-}
-
-/*
- * ============================================================
- * LEGEND ITEM
- * ============================================================
- */
-
-function LegendItem({
-  colorClass,
-  label,
-}: {
-  colorClass: string
-  label: string
-}) {
-  return (
-    <div className="d-flex align-items-center gap-2">
-      <span
-        className={`rounded-circle ${colorClass}`}
-        style={{
-          width: '10px',
-          height: '10px',
-          display: 'inline-block',
-        }}
-      />
-
-      <span>{label}</span>
-    </div>
-  )
-}
-
-/*
- * ============================================================
- * ADMIN MAP
- * ============================================================
- */
-
 function AdminMap() {
-  /*
-   * ----------------------------------------------------------
-   * LOAD REPORTS
-   * ----------------------------------------------------------
-   */
-
-  const [reports, setReports] = useState<Report[]>([])
-  const [loadError, setLoadError] = useState('')
+  const [searchParams, setSearchParams] = useSearchParams()
+  const selectedReference = searchParams.get('report') ?? ''
+  const [search, setSearch] = useState('')
+  const [status, setStatus] = useState('')
+  const [priority, setPriority] = useState('')
+  const [category, setCategory] = useState('')
+  const [departmentId, setDepartmentId] = useState('')
+  const [overdue, setOverdue] = useState('')
+  const [reports, setReports] = useState<ReportSummary[]>([])
+  const [departments, setDepartments] = useState<DepartmentRecord[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
 
   useEffect(() => {
-    getReportsFromApi().then(setReports).catch((error: unknown) => {
-      setLoadError(error instanceof Error ? error.message : 'Unable to load live map data.')
-    })
+    getDepartments()
+      .then(setDepartments)
+      .catch(() => setDepartments([]))
   }, [])
 
-  /*
-   * ----------------------------------------------------------
-   * REPORTS WITH VALID COORDINATES
-   * ----------------------------------------------------------
-   */
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError('')
 
-  const reportsWithCoordinates =
-    useMemo(() => {
-      return reports.filter(
-        (report) =>
-          typeof report.latitude === 'number' &&
-          typeof report.longitude === 'number' &&
-          Number.isFinite(report.latitude) &&
-          Number.isFinite(report.longitude),
-      )
-    }, [reports])
+    try {
+      const result = await getAllReports({
+        search: search.trim(),
+        status,
+        priority,
+        category,
+        departmentId,
+        overdue,
+      })
 
-  /*
-   * ----------------------------------------------------------
-   * SELECTED REPORT
-   * ----------------------------------------------------------
-   */
+      setReports(result.data)
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Unable to load map reports.')
+    } finally {
+      setLoading(false)
+    }
+  }, [search, status, priority, category, departmentId, overdue])
 
-  const [
-    selectedReport,
-    setSelectedReport,
-  ] = useState<Report | null>(
-    reportsWithCoordinates[0] ?? null,
+  useEffect(() => {
+    const timer = window.setTimeout(() => void load(), search ? 300 : 0)
+    return () => window.clearTimeout(timer)
+  }, [load, search])
+
+  const mappedReports = useMemo(
+    () => reports.filter((report) => report.latitude !== null && report.longitude !== null),
+    [reports],
   )
 
-  /*
-   * ----------------------------------------------------------
-   * PRIORITY FILTER
-   * ----------------------------------------------------------
-   */
+  const activeFilterCount = [search.trim(), status, priority, category, departmentId, overdue]
+    .filter(Boolean).length
 
-  const [
-    priorityFilter,
-    setPriorityFilter,
-  ] = useState<
-    'All' | ReportPriority
-  >('All')
+  function clearFilters() {
+    setSearch('')
+    setStatus('')
+    setPriority('')
+    setCategory('')
+    setDepartmentId('')
+    setOverdue('')
+  }
 
-  /*
-   * ----------------------------------------------------------
-   * FILTERED REPORTS
-   * ----------------------------------------------------------
-   */
+  const selectReport = useCallback((reference: string) => {
+    const next = new URLSearchParams(searchParams)
 
-  const filteredReports =
-    useMemo(() => {
-      if (
-        priorityFilter === 'All'
-      ) {
-        return reportsWithCoordinates
-      }
+    if (reference) {
+      next.set('report', reference)
+    } else {
+      next.delete('report')
+    }
 
-      return reportsWithCoordinates.filter(
-        (report) =>
-          report.priority ===
-          priorityFilter,
-      )
-    }, [
-      reportsWithCoordinates,
-      priorityFilter,
-    ])
-
-  const effectiveSelectedReport =
-    filteredReports.find(
-      (report) =>
-        report.reference === selectedReport?.reference,
-    ) ?? filteredReports[0] ?? null
-
-  /*
-   * ----------------------------------------------------------
-   * STATISTICS
-   * ----------------------------------------------------------
-   */
-
-  const criticalCount =
-    reportsWithCoordinates.filter(
-      (report) =>
-        report.priority === 'Critical',
-    ).length
-
-  const highCount =
-    reportsWithCoordinates.filter(
-      (report) =>
-        report.priority === 'High',
-    ).length
-
-  const mediumCount =
-    reportsWithCoordinates.filter(
-      (report) =>
-        report.priority === 'Medium',
-    ).length
-
-  const inProgressCount =
-    reportsWithCoordinates.filter(
-      (report) =>
-        report.status === 'In Progress',
-    ).length
-
-  const resolvedCount =
-    reportsWithCoordinates.filter(
-      (report) =>
-        report.status === 'Resolved',
-    ).length
-
-  /*
-   * ----------------------------------------------------------
-   * RENDER
-   * ----------------------------------------------------------
-   */
+    setSearchParams(next, { replace: true })
+  }, [searchParams, setSearchParams])
 
   return (
-    <div className="container-fluid px-0">
-      {loadError && <div className="alert alert-warning border-0" role="status">{loadError}</div>}
+    <div className="admin-page">
+      <PageHeading
+        eyebrow="Geospatial view"
+        title="Issue map"
+        description="Locate reports across the city, spot clusters, and jump straight into a case."
+        actions={(
+          <button type="button" className="admin-button primary" onClick={() => void load()} disabled={loading}>
+            <i className={`bi bi-arrow-clockwise${loading ? ' spin' : ''}`} aria-hidden="true" />
+            Refresh
+          </button>
+        )}
+      />
 
-      {/* ======================================================
-          PAGE HEADER
-      ====================================================== */}
+      {error && <ErrorNotice message={error} onRetry={() => void load()} />}
 
-      <div className="d-flex flex-column flex-xl-row justify-content-between align-items-xl-center gap-3 mb-4">
-
-        <div className="min-width-0">
-
-          <div className="text-primary small fw-bold text-uppercase mb-1">
-            Operations
-          </div>
-
-          <h1 className="h2 fw-bold mb-2">
-            Map Monitoring
-          </h1>
-
-          <p className="text-secondary mb-0">
-            Monitor report locations and identify
-            geographic concentrations of infrastructure
-            issues.
-          </p>
-
-        </div>
-
-        <Link
-          to="/admin/reports"
-          className="btn btn-outline-primary flex-shrink-0"
-        >
-          <i className="bi bi-file-earmark-text me-2" />
-          View Reports
-        </Link>
-
+      <div className="admin-map-summary">
+        <span><b>{reports.length}</b> reports in view</span>
+        <span><b>{mappedReports.length}</b> mapped</span>
+        <span><b>{reports.filter((report) => report.isOverdue).length}</b> overdue</span>
+        <span><b>{reports.filter((report) => !report.department).length}</b> unassigned</span>
       </div>
 
-      {/* ======================================================
-          SUMMARY CARDS
-      ====================================================== */}
-
-      <div className="row g-3 mb-4">
-
-        {/* MAPPED REPORTS */}
-
-        <div className="col-6 col-md-4 col-xl-3">
-
-          <div className="card border-0 shadow-sm h-100">
-
-            <div className="card-body p-3 p-md-4">
-
-              <div className="d-flex justify-content-between align-items-start gap-2">
-
-                <div>
-
-                  <div className="text-secondary small">
-                    Mapped Reports
-                  </div>
-
-                  <div className="fs-3 fw-bold mt-1">
-                    {
-                      reportsWithCoordinates.length
-                    }
-                  </div>
-
-                </div>
-
-                <i className="bi bi-geo-alt text-primary fs-4" />
-
-              </div>
-
-            </div>
-
-          </div>
-
-        </div>
-
-        {/* CRITICAL */}
-
-        <div className="col-6 col-md-4 col-xl-3">
-
-          <div className="card border-0 shadow-sm h-100">
-
-            <div className="card-body p-3 p-md-4">
-
-              <div className="d-flex justify-content-between align-items-start gap-2">
-
-                <div>
-
-                  <div className="text-secondary small">
-                    Critical
-                  </div>
-
-                  <div className="fs-3 fw-bold text-danger mt-1">
-                    {criticalCount}
-                  </div>
-
-                </div>
-
-                <i className="bi bi-exclamation-triangle text-danger fs-4" />
-
-              </div>
-
-            </div>
-
-          </div>
-
-        </div>
-
-        {/* HIGH */}
-
-        <div className="col-6 col-md-4 col-xl-3">
-
-          <div className="card border-0 shadow-sm h-100">
-
-            <div className="card-body p-3 p-md-4">
-
-              <div className="d-flex justify-content-between align-items-start gap-2">
-
-                <div>
-
-                  <div className="text-secondary small">
-                    High Priority
-                  </div>
-
-                  <div className="fs-3 fw-bold text-warning mt-1">
-                    {highCount}
-                  </div>
-
-                </div>
-
-                <i className="bi bi-exclamation-circle text-warning fs-4" />
-
-              </div>
-
-            </div>
-
-          </div>
-
-        </div>
-
-        {/* IN PROGRESS */}
-
-        <div className="col-6 col-md-4 col-xl-3">
-
-          <div className="card border-0 shadow-sm h-100">
-
-            <div className="card-body p-3 p-md-4">
-
-              <div className="d-flex justify-content-between align-items-start gap-2">
-
-                <div>
-
-                  <div className="text-secondary small">
-                    In Progress
-                  </div>
-
-                  <div className="fs-3 fw-bold text-primary mt-1">
-                    {inProgressCount}
-                  </div>
-
-                </div>
-
-                <i className="bi bi-arrow-repeat text-primary fs-4" />
-
-              </div>
-
-            </div>
-
-          </div>
-
-        </div>
-
-      </div>
-
-      {/* ======================================================
-          MAP + REPORT LIST
-      ====================================================== */}
-
-      <div className="row g-4">
-
-        {/* ====================================================
-            MAP
-        ==================================================== */}
-
-        <div className="col-12 col-xl-8">
-
-          <div className="card border-0 shadow-sm overflow-hidden">
-
-            {/* MAP HEADER */}
-
-            <div className="card-header bg-white border-0 p-3 p-md-4">
-
-              <div className="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-3">
-
-                <div>
-
-                  <h2 className="h5 fw-bold mb-1">
-                    Report Locations
-                  </h2>
-
-                  <p className="text-secondary small mb-0">
-                    Select a marker to inspect a report.
-                  </p>
-
-                </div>
-
-                <div className="d-flex align-items-center gap-2">
-
-                  <label
-                    htmlFor="priorityFilter"
-                    className="small text-secondary text-nowrap"
-                  >
-                    Priority
-                  </label>
-
-                  <select
-                    id="priorityFilter"
-                    className="form-select form-select-sm"
-                    value={priorityFilter}
-                    onChange={(event) =>
-                      setPriorityFilter(
-                        event.target.value as
-                          | 'All'
-                          | ReportPriority,
-                      )
-                    }
-                    style={{
-                      minWidth: '130px',
-                    }}
-                  >
-
-                    <option value="All">
-                      All
-                    </option>
-
-                    <option value="Critical">
-                      Critical
-                    </option>
-
-                    <option value="High">
-                      High
-                    </option>
-
-                    <option value="Medium">
-                      Medium
-                    </option>
-
-                    <option value="Low">
-                      Low
-                    </option>
-
-                  </select>
-
-                </div>
-
-              </div>
-
-            </div>
-
-            {/* MAP */}
-
-            <div
-              style={{
-                height:
-                  'clamp(400px, 60vh, 650px)',
-                width: '100%',
-              }}
+      <div className="admin-map-layout">
+        <section className="admin-panel admin-map-panel">
+          {loading && reports.length === 0 ? (
+            <div className="admin-map-loading"><SkeletonPanel rows={10} /></div>
+          ) : (
+            <MapContainer
+              center={DEFAULT_CENTER}
+              zoom={11}
+              scrollWheelZoom
+              className="admin-map-canvas"
             >
+              <TileLayer
+                attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+              />
+              <ClusterLayer
+                reports={mappedReports}
+                selectedReference={selectedReference}
+                onSelect={selectReport}
+              />
+            </MapContainer>
+          )}
 
-              <MapContainer
-                center={KIGALI_CENTER}
-                zoom={12}
-                scrollWheelZoom
-                className="w-100 h-100"
-              >
+          {!loading && mappedReports.length === 0 && (
+            <div className="admin-map-empty-overlay">
+              <EmptyState
+                icon="bi-geo-alt"
+                title="No mapped reports"
+                text="Reports without valid coordinates cannot be placed on the map. Clear filters or wait for new location data."
+              />
+            </div>
+          )}
+        </section>
 
-                <TileLayer
-                  attribution="&copy; OpenStreetMap contributors"
-                  url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                />
+        <aside className="admin-map-sidebar">
+          <section className="admin-panel admin-map-filter-panel">
+            <PanelHeading
+              title="Filters"
+              action={activeFilterCount > 0 ? (
+                <button type="button" className="admin-text-link" onClick={clearFilters}>
+                  Clear
+                </button>
+              ) : undefined}
+            />
+            <div className="admin-search-field">
+              <i className="bi bi-search" aria-hidden="true" />
+              <input
+                type="search"
+                placeholder="Search reports…"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                aria-label="Search mapped reports"
+              />
+            </div>
+            <div className="admin-map-filter-grid">
+              <label className="admin-filter-field">
+                <span>Status</span>
+                <select value={status} onChange={(event) => setStatus(event.target.value)}>
+                  <option value="">All</option>
+                  {REPORT_STATUSES.map((item) => <option key={item}>{item}</option>)}
+                </select>
+              </label>
+              <label className="admin-filter-field">
+                <span>Priority</span>
+                <select value={priority} onChange={(event) => setPriority(event.target.value)}>
+                  <option value="">All</option>
+                  {REPORT_PRIORITIES.map((item) => <option key={item}>{item}</option>)}
+                </select>
+              </label>
+              <label className="admin-filter-field">
+                <span>Category</span>
+                <select value={category} onChange={(event) => setCategory(event.target.value)}>
+                  <option value="">All</option>
+                  {REPORT_CATEGORIES.map((item) => <option key={item}>{item}</option>)}
+                </select>
+              </label>
+              <label className="admin-filter-field">
+                <span>Department</span>
+                <select value={departmentId} onChange={(event) => setDepartmentId(event.target.value)}>
+                  <option value="">All</option>
+                  {departments.map((department) => (
+                    <option key={department.id} value={department.id}>{department.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="admin-filter-field">
+                <span>SLA</span>
+                <select value={overdue} onChange={(event) => setOverdue(event.target.value)}>
+                  <option value="">All</option>
+                  <option value="true">Overdue</option>
+                  <option value="false">Within SLA</option>
+                </select>
+              </label>
+            </div>
+          </section>
 
-                <MapController
-                  report={effectiveSelectedReport}
-                />
+          <section className="admin-panel admin-map-list-panel">
+            <PanelHeading
+              title="Reports in view"
+              description={`${mappedReports.length} with coordinates`}
+            />
+            {loading && reports.length === 0 ? (
+              <SkeletonPanel rows={4} />
+            ) : reports.length === 0 ? (
+              <EmptyState
+                icon="bi-search"
+                title="Nothing matches"
+                text="No reports match the current filters."
+              />
+            ) : (
+              <div className="admin-map-list">
+                {reports.map((report) => {
+                  const mapped = report.latitude !== null && report.longitude !== null
+                  const active = report.reference === selectedReference
 
-                {filteredReports.map(
-                  (report) => {
-
-                    if (
-                      report.latitude === null ||
-                      report.longitude === null
-                    ) {
-                      return null
-                    }
-
-                    return (
-                      <Marker
-                        key={
-                          report.reference
-                        }
-                        position={[
-                          report.latitude,
-                          report.longitude,
-                        ]}
-                        icon={
-                          defaultIcon
-                        }
-                        eventHandlers={{
-                          click: () =>
-                            setSelectedReport(
-                              report,
-                            ),
-                        }}
+                  return (
+                    <div key={report.id} className={`admin-map-list-item${active ? ' active' : ''}`}>
+                      <button
+                        type="button"
+                        className="admin-map-list-main"
+                        onClick={() => mapped && selectReport(report.reference)}
+                        disabled={!mapped}
+                        title={mapped ? 'Show on map' : 'No coordinates available'}
                       >
-
-                        <Popup>
-
-                          <div
-                            style={{
-                              minWidth:
-                                '220px',
-                            }}
-                          >
-
-                            <div className="fw-bold mb-1">
-                              {
-                                report.reference
-                              }
-                            </div>
-
-                            <div className="small text-secondary mb-2">
-                              {
-                                report.category
-                              }
-                            </div>
-
-                            <div className="mb-2">
-
-                              <span
-                                className={`badge text-bg-${getPriorityClass(
-                                  report.priority,
-                                )}`}
-                              >
-                                {
-                                  report.priority
-                                }
-                              </span>
-
-                            </div>
-
-                            <div className="small mb-3">
-
-                              <i className="bi bi-geo-alt me-1" />
-
-                              {
-                                report.location
-                              }
-
-                            </div>
-
-                            <Link
-                              to={`/admin/reports/${encodeURIComponent(
-                                report.reference,
-                              )}`}
-                              className="btn btn-sm btn-primary w-100"
-                            >
-                              View Report
-                            </Link>
-
-                          </div>
-
-                        </Popup>
-
-                      </Marker>
-                    )
-                  },
-                )}
-
-              </MapContainer>
-
-            </div>
-
-            {/* MAP LEGEND */}
-
-            <div className="card-footer bg-white border-0 p-3">
-
-              <div className="d-flex flex-wrap gap-3 small">
-
-                <LegendItem
-                  colorClass="bg-danger"
-                  label="Critical"
-                />
-
-                <LegendItem
-                  colorClass="bg-warning"
-                  label="High"
-                />
-
-                <LegendItem
-                  colorClass="bg-primary"
-                  label="Medium"
-                />
-
-                <LegendItem
-                  colorClass="bg-secondary"
-                  label="Low"
-                />
-
+                        <span className={`admin-map-list-dot ${markerClass(report)}`} aria-hidden="true" />
+                        <span className="admin-map-list-copy">
+                          <b>{report.title}</b>
+                          <small>{report.reference} · {report.department?.name ?? 'Unassigned'}</small>
+                        </span>
+                      </button>
+                      <div className="admin-map-list-meta">
+                        <StatusBadge status={report.status} />
+                        <PriorityBadge priority={report.priority} />
+                        {mapped ? (
+                          <span className="admin-map-list-time">{formatRelative(report.createdAt)}</span>
+                        ) : (
+                          <span className="admin-map-no-coords">No map pin</span>
+                        )}
+                        <Link to={`/admin/reports/${report.reference}`} aria-label={`Open ${report.reference}`}>
+                          <i className="bi bi-arrow-up-right" aria-hidden="true" />
+                        </Link>
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
-
-            </div>
-
-          </div>
-
-        </div>
-
-        {/* ====================================================
-            REPORT LIST
-        ==================================================== */}
-
-        <div className="col-12 col-xl-4">
-
-          <div className="card border-0 shadow-sm h-100">
-
-            <div className="card-header bg-white border-0 p-3 p-md-4">
-
-              <div className="d-flex justify-content-between align-items-center">
-
-                <div>
-
-                  <h2 className="h5 fw-bold mb-1">
-                    Mapped Reports
-                  </h2>
-
-                  <div className="small text-secondary">
-                    {filteredReports.length}{' '}
-                    report
-                    {filteredReports.length !==
-                    1
-                      ? 's'
-                      : ''}
-                  </div>
-
-                </div>
-
-                <i className="bi bi-list-ul text-primary fs-5" />
-
-              </div>
-
-            </div>
-
-            <div
-              className="card-body p-0"
-              style={{
-                maxHeight:
-                  'clamp(400px, 60vh, 650px)',
-                overflowY: 'auto',
-              }}
-            >
-
-              {filteredReports.length ===
-              0 ? (
-
-                <div className="p-4 text-center text-secondary">
-
-                  <i className="bi bi-geo-alt fs-1 d-block mb-3" />
-
-                  <div className="fw-semibold">
-                    No mapped reports
-                  </div>
-
-                  <div className="small mt-1">
-                    No reports match the selected
-                    priority filter.
-                  </div>
-
-                </div>
-
-              ) : (
-
-                <div className="list-group list-group-flush">
-
-                  {filteredReports.map(
-                    (report) => {
-
-                      const isSelected =
-                        effectiveSelectedReport?.reference ===
-                        report.reference
-
-                      return (
-
-                        <div
-                          key={
-                            report.reference
-                          }
-                          className={`list-group-item p-3 ${
-                            isSelected
-                              ? 'bg-primary-subtle'
-                              : ''
-                          }`}
-                        >
-
-                          <div className="d-flex justify-content-between align-items-start gap-2">
-
-                            <button
-                              type="button"
-                              className="btn btn-link text-decoration-none text-start p-0 border-0 flex-grow-1"
-                              onClick={() =>
-                                setSelectedReport(
-                                  report,
-                                )
-                              }
-                            >
-
-                              <div className="fw-bold font-monospace text-break">
-                                {
-                                  report.reference
-                                }
-                              </div>
-
-                              <div className="small text-secondary mt-1">
-                                {
-                                  report.category
-                                }
-                              </div>
-
-                            </button>
-
-                            <span
-                              className={`badge text-bg-${getPriorityClass(
-                                report.priority,
-                              )} flex-shrink-0`}
-                            >
-                              {
-                                report.priority
-                              }
-                            </span>
-
-                          </div>
-
-                          <div className="small mt-2">
-
-                            <i className="bi bi-geo-alt me-1 text-secondary" />
-
-                            {
-                              report.location
-                            }
-
-                          </div>
-
-                          <div className="small text-secondary mt-1">
-
-                            <i className="bi bi-clock me-1" />
-
-                            {formatDate(
-                              report.createdAt,
-                            )}
-
-                          </div>
-
-                          <div className="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-3">
-
-                            <span className="badge text-bg-light border">
-                              {
-                                report.status
-                              }
-                            </span>
-
-                            <Link
-                              to={`/admin/reports/${encodeURIComponent(
-                                report.reference,
-                              )}`}
-                              className="small fw-semibold text-decoration-none"
-                            >
-                              Details
-
-                              <i className="bi bi-arrow-right ms-1" />
-                            </Link>
-
-                          </div>
-
-                        </div>
-
-                      )
-                    },
-                  )}
-
-                </div>
-
-              )}
-
-            </div>
-
-          </div>
-
-        </div>
-
+            )}
+          </section>
+        </aside>
       </div>
-
-      {/* ======================================================
-          ADDITIONAL STATISTICS
-      ====================================================== */}
-
-      <div className="row g-3 mt-1">
-
-        <div className="col-12 col-md-6">
-
-          <div className="card border-0 shadow-sm h-100">
-
-            <div className="card-body">
-
-              <div className="d-flex justify-content-between">
-
-                <div>
-
-                  <div className="small text-secondary">
-                    Resolved Reports
-                  </div>
-
-                  <div className="h4 fw-bold mb-0 mt-1">
-                    {resolvedCount}
-                  </div>
-
-                </div>
-
-                <i className="bi bi-check-circle text-success fs-4" />
-
-              </div>
-
-            </div>
-
-          </div>
-
-        </div>
-
-        <div className="col-12 col-md-6">
-
-          <div className="card border-0 shadow-sm h-100">
-
-            <div className="card-body">
-
-              <div className="d-flex justify-content-between">
-
-                <div>
-
-                  <div className="small text-secondary">
-                    Medium Priority
-                  </div>
-
-                  <div className="h4 fw-bold mb-0 mt-1">
-                    {mediumCount}
-                  </div>
-
-                </div>
-
-                <i className="bi bi-info-circle text-primary fs-4" />
-
-              </div>
-
-            </div>
-
-          </div>
-
-        </div>
-
-      </div>
-
-      {/* ======================================================
-          INFORMATION NOTE
-      ====================================================== */}
-
-      <div className="alert alert-info border-0 mt-4 mb-0">
-
-        <div className="d-flex gap-3">
-
-          <i className="bi bi-info-circle fs-5 flex-shrink-0" />
-
-          <div>
-
-            <div className="fw-semibold">
-              Geographic monitoring
-            </div>
-
-            <div className="small mt-1">
-              This map helps administrators identify
-              where infrastructure reports are concentrated.
-              It is a decision-support tool and does not
-              automatically determine operational actions.
-            </div>
-
-          </div>
-
-        </div>
-
-      </div>
-
     </div>
   )
 }
