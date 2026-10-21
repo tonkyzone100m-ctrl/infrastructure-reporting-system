@@ -17,6 +17,7 @@ import {
   mapPagination,
   optionalText,
   parseBoolean,
+  parseDate,
   parseOptionalId,
   parsePagination,
   parseSort,
@@ -161,6 +162,27 @@ router.get('/', async (request, response) => {
     conditions.push(
       `(r.reference ILIKE $${parameters.length} OR r.title ILIKE $${parameters.length})`,
     )
+  }
+
+  const dateFrom = parseDate(
+    request.query.dateFrom ?? request.query.date_from,
+    'dateFrom',
+  )
+
+  if (dateFrom !== null) {
+    parameters.push(dateFrom)
+    conditions.push(`r.created_at >= $${parameters.length}`)
+  }
+
+  const dateTo = parseDate(
+    request.query.dateTo ?? request.query.date_to,
+    'dateTo',
+    { endOfDay: true },
+  )
+
+  if (dateTo !== null) {
+    parameters.push(dateTo)
+    conditions.push(`r.created_at <= $${parameters.length}`)
   }
 
   const sort = parseSort(request.query, REPORT_SORTS, {

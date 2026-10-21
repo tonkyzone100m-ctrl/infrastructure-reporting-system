@@ -85,7 +85,7 @@ router.get('/', requireRoles(...AUDIT_VIEW_ROLES), async (request, response) => 
     conditions.push(`log.created_at >= $${parameters.length}`)
   }
 
-  const to = parseDate(request.query.to, 'to')
+  const to = parseDate(request.query.to, 'to', { endOfDay: true })
 
   if (to !== null) {
     parameters.push(to)

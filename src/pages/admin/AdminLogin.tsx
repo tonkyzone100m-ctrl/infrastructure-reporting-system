@@ -1,96 +1,162 @@
-import { useState } from 'react'
-import type { FormEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useState, type FormEvent } from 'react'
+import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom'
 
-import { loginWithApi } from '../../services/apiClient'
-import { saveCurrentUser } from '../../services/auth'
+import { loginAdmin } from '../../services/adminApi'
+import { getCurrentUser, signOut } from '../../services/auth'
+import { isStaffRole } from '../../types/adminPanel'
 
 function AdminLogin() {
   const navigate = useNavigate()
+  const location = useLocation()
+  const currentUser = getCurrentUser()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
-  const [error, setError] = useState('')
-  const [isSubmitting, setIsSubmitting] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState('')
+
+  if (currentUser && isStaffRole(currentUser.role)) {
+    return <Navigate to="/admin" replace />
+  }
+
+  const from = (location.state as { from?: string } | null)?.from ?? '/admin'
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    setSubmitting(true)
     setError('')
-    setIsSubmitting(true)
 
     try {
-      const user = await loginWithApi(email.trim(), password)
-      if (user.role !== 'admin') {
-        setError('This account does not have administrator access.')
+      const user = await loginAdmin(email.trim(), password)
+
+      if (!isStaffRole(user.role)) {
+        signOut()
+        setError('This account does not have access to the administration portal.')
         return
       }
-      saveCurrentUser(user)
-      navigate('/admin', { replace: true })
-    } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : 'Unable to sign in.')
+
+      navigate(from.startsWith('/admin') ? from : '/admin', { replace: true })
+    } catch (loginError) {
+      setError(
+        loginError instanceof Error
+          ? loginError.message
+          : 'Sign in failed. Check your email and password.',
+      )
     } finally {
-      setIsSubmitting(false)
+      setSubmitting(false)
     }
   }
 
   return (
-    <div className="container py-5">
-      <div className="row justify-content-center">
-        <div className="col-md-5">
-          <div className="card border-0 shadow-sm">
-            <div className="card-body p-4">
-              <h1 className="h3 fw-bold">Admin Sign In</h1>
-              <p className="text-secondary">
-                Sign in to access the ReportHub administration portal.
-              </p>
+    <div className="admin-login-shell">
+      <section className="admin-login-story">
+        <Link to="/" className="admin-brand light">
+          <span className="admin-brand-mark">R</span>
+          <span className="admin-brand-copy">
+            <b>ReportHub</b>
+            <small>City operations</small>
+          </span>
+        </Link>
 
-              {error && <div className="alert alert-danger" role="alert">{error}</div>}
-              <form onSubmit={handleSubmit}>
-                <label className="form-label fw-semibold">Email</label>
+        <div>
+          <span className="admin-eyebrow light">Administration portal</span>
+          <h1>Keep the city moving.</h1>
+          <p>
+            Triage reports, coordinate departments, and track every response
+            from first signal to resolution.
+          </p>
+          <div className="admin-login-points">
+            <span><i className="bi bi-inboxes" aria-hidden="true" /> One operational queue</span>
+            <span><i className="bi bi-geo-alt" aria-hidden="true" /> Live issue mapping</span>
+            <span><i className="bi bi-shield-check" aria-hidden="true" /> Full audit trail</span>
+          </div>
+        </div>
+
+        <small className="admin-login-footnote">
+          Authorized staff access only. All actions are recorded.
+        </small>
+      </section>
+
+      <section className="admin-login-side">
+        <div className="admin-login-card">
+          <div className="admin-login-card-head">
+            <span className="admin-login-icon">
+              <i className="bi bi-shield-lock" aria-hidden="true" />
+            </span>
+            <h2>Sign in</h2>
+            <p>Use your ReportHub staff credentials to continue.</p>
+          </div>
+
+          <form onSubmit={(event) => void handleSubmit(event)}>
+            <label className="admin-field">
+              <span>Email address</span>
+              <div className="admin-input-wrap">
+                <i className="bi bi-envelope" aria-hidden="true" />
                 <input
                   type="email"
-                  className="form-control mb-3"
-                  placeholder="admin@example.com"
+                  name="email"
+                  autoComplete="email"
+                  placeholder="you@reporthub.city"
                   value={email}
                   onChange={(event) => setEmail(event.target.value)}
                   required
+                  autoFocus
                 />
+              </div>
+            </label>
 
-                <label htmlFor="admin-password" className="form-label fw-semibold">Password</label>
-                <div className="input-group mb-4">
-                  <input
-                    id="admin-password"
-                    type={showPassword ? 'text' : 'password'}
-                    className="form-control"
-                    placeholder="Enter password"
-                    value={password}
-                    onChange={(event) => setPassword(event.target.value)}
-                    autoComplete="current-password"
-                    required
-                  />
-                  <button
-                    type="button"
-                    className="btn btn-outline-secondary"
-                    onClick={() => setShowPassword((visible) => !visible)}
-                    aria-label={showPassword ? 'Hide password' : 'Show password'}
-                    aria-pressed={showPassword}
-                  >
-                    <i className={`bi ${showPassword ? 'bi-eye-slash' : 'bi-eye'}`} aria-hidden="true" />
-                  </button>
-                </div>
-
+            <label className="admin-field">
+              <span>Password</span>
+              <div className="admin-input-wrap">
+                <i className="bi bi-lock" aria-hidden="true" />
+                <input
+                  type={showPassword ? 'text' : 'password'}
+                  name="password"
+                  autoComplete="current-password"
+                  placeholder="Enter your password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  required
+                />
                 <button
-                  type="submit"
-                  className="btn btn-primary w-100"
-                  disabled={isSubmitting}
+                  type="button"
+                  className="admin-input-action"
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
+                  onClick={() => setShowPassword((current) => !current)}
                 >
-                  {isSubmitting ? 'Signing in...' : 'Sign In'}
+                  <i className={`bi ${showPassword ? 'bi-eye-slash' : 'bi-eye'}`} aria-hidden="true" />
                 </button>
-              </form>
-            </div>
+              </div>
+            </label>
+
+            {error && (
+              <div className="admin-login-error" role="alert">
+                <i className="bi bi-exclamation-circle" aria-hidden="true" />
+                {error}
+              </div>
+            )}
+
+            <button type="submit" className="admin-button primary wide" disabled={submitting}>
+              {submitting ? (
+                <>
+                  <span className="admin-spinner small" aria-hidden="true" />
+                  Signing in…
+                </>
+              ) : (
+                <>
+                  Sign in to administration
+                  <i className="bi bi-arrow-right" aria-hidden="true" />
+                </>
+              )}
+            </button>
+          </form>
+
+          <div className="admin-login-links">
+            <Link to="/">Back to public portal</Link>
+            <span>Need help? Contact your system administrator.</span>
           </div>
         </div>
-      </div>
+      </section>
     </div>
   )
 }

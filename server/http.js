@@ -84,15 +84,20 @@ export function parseBoolean(value, fieldName) {
   throw new HttpError(400, `${fieldName} must be true or false.`)
 }
 
-export function parseDate(value, fieldName) {
+export function parseDate(value, fieldName, { endOfDay = false } = {}) {
   if (value === undefined || value === null || value === '') {
     return null
   }
 
-  const date = new Date(String(value))
+  const rawValue = String(value)
+  const date = new Date(rawValue)
 
   if (Number.isNaN(date.getTime())) {
     throw new HttpError(400, `${fieldName} must be a valid date.`)
+  }
+
+  if (endOfDay && /^\d{4}-\d{2}-\d{2}$/.test(rawValue)) {
+    date.setUTCHours(23, 59, 59, 999)
   }
 
   return date.toISOString()

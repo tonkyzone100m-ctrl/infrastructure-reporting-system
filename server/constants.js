@@ -66,4 +66,4 @@ export const AUDIT_VIEW_ROLES = Object.freeze([
 
 export const MAX_COMMENT_LENGTH = 2000
 export const MAX_EVIDENCE_BYTES = 10 * 1024 * 1024
-export const SLA_DUE_SOON_DAYS = 7
+export const SLA_DUE_SOON_HOURS = 24
