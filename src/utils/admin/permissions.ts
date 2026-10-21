@@ -52,7 +52,7 @@ export function hasAdminPermission(
     return false
   }
 
-  return ROLE_PERMISSIONS[role].has(permission)
+  return ROLE_PERMISSIONS[role as AdminUserRole]?.has(permission) ?? false
 }
 
 export function canAccessAdmin(
@@ -60,7 +60,7 @@ export function canAccessAdmin(
   permission: AdminPermission,
 ): boolean {
   return hasAdminPermission(
-    user?.role,
+    user?.role as AdminUserRole | null | undefined,
     permission,
   )
 }

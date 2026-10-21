@@ -29,6 +29,7 @@ import AdminDepartments from './pages/admin/AdminDepartments'
 import AdminUsers from './pages/admin/AdminUsers'
 import AdminAuditLog from './pages/admin/AdminAuditLog'
 import RequireAuth from './components/RequireAuth'
+import { RequireAdmin, RequireAuditAccess } from './components/admin/AdminGuards'
 
 function NotFound() {
   return (
@@ -80,9 +81,14 @@ function App() {
             <Route path="reports/:id" element={<AdminReportDetails />} />
             <Route path="map" element={<AdminMap />} />
             <Route path="ai-analyzer" element={<AdminAIAnalyzer />} />
-            <Route path="departments" element={<AdminDepartments />} />
-            <Route path="users" element={<AdminUsers />} />
-            <Route path="audit-log" element={<AdminAuditLog />} />
+            <Route element={<RequireAdmin />}>
+              <Route path="departments" element={<AdminDepartments />} />
+              <Route path="users" element={<AdminUsers />} />
+            </Route>
+
+            <Route element={<RequireAuditAccess />}>
+              <Route path="audit-log" element={<AdminAuditLog />} />
+            </Route>
 
             <Route path="notifications" element={<Navigate to="/admin" replace />} />
             <Route path="analytics" element={<Navigate to="/admin" replace />} />
