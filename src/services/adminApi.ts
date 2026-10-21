@@ -1,4 +1,4 @@
-import { TOKEN_KEY, saveSession } from './auth'
+import { TOKEN_KEY, saveSession, signOut } from './auth'
 
 import type {
   AuditRecord,
@@ -87,6 +87,14 @@ async function request<T>(
   }
 
   if (!response.ok) {
+    if (response.status === 401 && path !== '/auth/login') {
+      signOut()
+
+      if (window.location.pathname.startsWith('/admin')) {
+        window.location.assign('/admin/login')
+      }
+    }
+
     throw new ApiError(
       body.error ?? body.message ?? 'The API request failed.',
       response.status,

@@ -27,7 +27,8 @@ import {
   formatRelative,
 } from '../../components/admin/AdminUi'
 import { getOverview } from '../../services/adminApi'
-import type { OverviewData, ReportSummary } from '../../types/adminPanel'
+import { getCurrentUser } from '../../services/auth'
+import { isAdminRole, type OverviewData, type ReportSummary } from '../../types/adminPanel'
 
 const STATUS_COLORS: Record<string, string> = {
   Received: '#e5b85e',
@@ -58,6 +59,7 @@ function ReportLink({ report }: { report: ReportSummary }) {
 }
 
 function AdminDashboard() {
+  const canManageStructure = isAdminRole(getCurrentUser()?.role)
   const [data, setData] = useState<OverviewData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -294,7 +296,7 @@ function AdminDashboard() {
               <PanelHeading
                 title="Department workload"
                 description="Assigned reports by department"
-                action={<Link to="/admin/departments" className="admin-text-link">Open departments</Link>}
+                action={canManageStructure ? <Link to="/admin/departments" className="admin-text-link">Open departments</Link> : undefined}
               />
               <div className="admin-department-bars">
                 {data.byDepartment.map((department) => (

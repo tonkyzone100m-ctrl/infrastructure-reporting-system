@@ -116,7 +116,7 @@ function AdminLayout() {
           <div className="admin-topbar-account">
             <div className="admin-account-copy">
               <b>{user.name}</b>
-              <small>{user.role_full ?? roleLabel(user.role)}</small>
+              <small>{roleLabel(user.role_full ?? user.role)}</small>
             </div>
             <span className="admin-avatar" aria-hidden="true">{initials(user.name)}</span>
             <button type="button" className="admin-signout-button" onClick={handleSignOut}>
