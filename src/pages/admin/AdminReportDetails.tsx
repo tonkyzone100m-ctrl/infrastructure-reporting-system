@@ -1,525 +1,643 @@
-import { useEffect, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+} from 'react'
 import { Link, useParams } from 'react-router-dom'
 
-import { getReportFromApi, updateReportFromApi } from '../../services/apiClient'
+import {
+  EmptyState,
+  ErrorNotice,
+  PageHeading,
+  PanelHeading,
+  PriorityBadge,
+  SkeletonPanel,
+  StatusBadge,
+  formatDateTime,
+  initials,
+} from '../../components/admin/AdminUi'
+import { useToast } from '../../components/admin/ToastProvider'
+import {
+  addComment,
+  fetchEvidenceBlob,
+  getDepartments,
+  getReport,
+  getUsers,
+  updateReport,
+  type ReportUpdate,
+} from '../../services/adminApi'
+import { getCurrentUser } from '../../services/auth'
+import {
+  REPORT_PRIORITIES,
+  REPORT_STATUSES,
+  canManageReports,
+  isStaffRole,
+  roleLabel,
+  type DepartmentRecord,
+  type EvidenceRecord,
+  type ReportDetail,
+  type UserRecord,
+} from '../../types/adminPanel'
 
-import type {
-  ReportPriority,
-  ReportStatus,
-} from '../../types/report'
+function toDateTimeInput(value: string | null): string {
+  if (!value) {
+    return ''
+  }
 
-function AdminReportDetails() {
-  const { id } = useParams<{
-    id: string
-  }>()
+  const date = new Date(value)
+  const offset = date.getTimezoneOffset()
+  const local = new Date(date.getTime() - offset * 60_000)
+  return local.toISOString().slice(0, 16)
+}
 
-  const [report, setReport] = useState<Awaited<ReturnType<typeof getReportFromApi>> | undefined>()
-  const [loadError, setLoadError] = useState('')
-  const [status, setStatus] = useState<ReportStatus>(report?.status ?? 'Under Review')
-  const [priority, setPriority] = useState<ReportPriority>(report?.priority ?? 'Medium')
-  const [saved, setSaved] = useState(false)
-  const [saving, setSaving] = useState(false)
+function toIsoOrNull(value: string): string | null {
+  return value ? new Date(value).toISOString() : null
+}
+
+function formatFileSize(bytes: number | null): string {
+  if (!bytes) {
+    return 'Unknown size'
+  }
+
+  if (bytes < 1024) {
+    return `${bytes} B`
+  }
+
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`
+  }
+
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function humanizeAction(action: string): string {
+  return action
+    .replaceAll('_', ' ')
+    .replaceAll('.', ' · ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+function EvidenceCard({ item }: { item: EvidenceRecord }) {
+  const [previewUrl, setPreviewUrl] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [failed, setFailed] = useState(false)
+  const [downloading, setDownloading] = useState(false)
+  const { showToast } = useToast()
+  const isImage = Boolean(item.mimeType?.startsWith('image/'))
 
   useEffect(() => {
-    if (!id) return
-    getReportFromApi(id).then((loadedReport) => {
-      setReport(loadedReport)
-      setStatus(loadedReport.status)
-      setPriority(loadedReport.priority)
-    }).catch((error: unknown) => {
-      setLoadError(error instanceof Error ? error.message : 'Unable to load this report.')
-    })
-  }, [id])
+    if (!isImage) {
+      return
+    }
 
-  async function saveChanges() {
-    if (!report || saving) return
-    setSaving(true)
-    setSaved(false)
+    let objectUrl = ''
+    let cancelled = false
+
+    setLoading(true)
+
+    fetchEvidenceBlob(item.downloadUrl)
+      .then((blob) => {
+        if (!cancelled) {
+          objectUrl = URL.createObjectURL(blob)
+          setPreviewUrl(objectUrl)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setFailed(true)
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoading(false)
+        }
+      })
+
+    return () => {
+      cancelled = true
+
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl)
+      }
+    }
+  }, [isImage, item.downloadUrl])
+
+  async function handleDownload() {
+    setDownloading(true)
+
     try {
-      const updated = await updateReportFromApi(report.reference, { status, priority })
+      const blob = await fetchEvidenceBlob(item.downloadUrl)
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+
+      link.href = url
+      link.download = item.originalName
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+    } catch (downloadError) {
+      showToast(
+        downloadError instanceof Error ? downloadError.message : 'The evidence could not be downloaded.',
+        'error',
+      )
+    } finally {
+      setDownloading(false)
+    }
+  }
+
+  return (
+    <article className="admin-evidence-card">
+      <div className="admin-evidence-preview">
+        {isImage && previewUrl && <img src={previewUrl} alt={item.originalName} />}
+        {isImage && loading && <span className="admin-spinner" aria-label="Loading preview" />}
+        {isImage && !loading && !previewUrl && (
+          <i className={`bi ${failed ? 'bi-image' : 'bi-hourglass'}`} aria-hidden="true" />
+        )}
+        {!isImage && <i className="bi bi-file-earmark-text" aria-hidden="true" />}
+      </div>
+      <div className="admin-evidence-copy">
+        <b title={item.originalName}>{item.originalName}</b>
+        <small>{formatFileSize(item.sizeBytes)} · {formatDateTime(item.uploadedAt)}</small>
+      </div>
+      <button type="button" onClick={() => void handleDownload()} disabled={downloading}>
+        {downloading ? (
+          <span className="admin-spinner small" aria-hidden="true" />
+        ) : (
+          <i className="bi bi-download" aria-hidden="true" />
+        )}
+        <span>Download</span>
+      </button>
+    </article>
+  )
+}
+
+function AdminReportDetails() {
+  const { id = '' } = useParams()
+  const { showToast } = useToast()
+  const user = getCurrentUser()
+  const canManage = canManageReports(user?.role)
+  const [report, setReport] = useState<ReportDetail | null>(null)
+  const [departments, setDepartments] = useState<DepartmentRecord[]>([])
+  const [staff, setStaff] = useState<UserRecord[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState('')
+  const [comment, setComment] = useState('')
+  const [commenting, setCommenting] = useState(false)
+
+  const [status, setStatus] = useState('')
+  const [priority, setPriority] = useState('')
+  const [departmentId, setDepartmentId] = useState('')
+  const [assignedTo, setAssignedTo] = useState('')
+  const [slaDeadline, setSlaDeadline] = useState('')
+
+  const applyForm = useCallback((value: ReportDetail) => {
+    setStatus(value.status)
+    setPriority(value.priority)
+    setDepartmentId(value.department?.id ?? '')
+    setAssignedTo(value.assignedTo?.id ?? '')
+    setSlaDeadline(toDateTimeInput(value.slaDeadline))
+  }, [])
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError('')
+
+    try {
+      const result = await getReport(id)
+      setReport(result)
+      applyForm(result)
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Unable to load this report.')
+    } finally {
+      setLoading(false)
+    }
+  }, [id, applyForm])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  useEffect(() => {
+    Promise.all([
+      getDepartments(),
+      getUsers({ pageSize: '100' }),
+    ])
+      .then(([departmentRows, userResult]) => {
+        setDepartments(departmentRows)
+        setStaff(userResult.data.filter((candidate) => isStaffRole(candidate.role)))
+      })
+      .catch(() => {
+        setDepartments([])
+        setStaff([])
+      })
+  }, [])
+
+  const hasChanges = useMemo(() => {
+    if (!report) {
+      return false
+    }
+
+    return (
+      status !== report.status ||
+      priority !== report.priority ||
+      departmentId !== (report.department?.id ?? '') ||
+      assignedTo !== (report.assignedTo?.id ?? '') ||
+      slaDeadline !== toDateTimeInput(report.slaDeadline)
+    )
+  }, [report, status, priority, departmentId, assignedTo, slaDeadline])
+
+  async function handleSave(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+
+    if (!report) {
+      return
+    }
+
+    setSaving(true)
+    setSaveError('')
+
+    try {
+      const changes: ReportUpdate = {
+        status,
+        priority,
+        department_id: departmentId || null,
+        assigned_to: assignedTo || null,
+        sla_deadline: toIsoOrNull(slaDeadline),
+      }
+      const updated = await updateReport(report.reference, changes)
       setReport(updated)
-      setStatus(updated.status)
-      setPriority(updated.priority)
-      setSaved(true)
-    } catch (error: unknown) {
-      setLoadError(error instanceof Error ? error.message : 'Unable to save report changes.')
+      applyForm(updated)
+      showToast(`${updated.reference} updated.`, 'success')
+    } catch (saveUpdateError) {
+      const message = saveUpdateError instanceof Error
+        ? saveUpdateError.message
+        : 'The report could not be updated.'
+      setSaveError(message)
+      showToast(message, 'error')
     } finally {
       setSaving(false)
     }
   }
 
-  function formatDate(date: string): string {
-    const parsedDate = new Date(date)
+  async function handleComment(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
 
-    if (Number.isNaN(parsedDate.getTime())) {
-      return 'Date unavailable'
+    if (!report || !comment.trim()) {
+      return
     }
 
-    return parsedDate.toLocaleString(
-      undefined,
-      {
-        dateStyle: 'medium',
-        timeStyle: 'short',
-      },
+    setCommenting(true)
+
+    try {
+      const created = await addComment(report.id, comment.trim())
+      setReport((current) => current
+        ? { ...current, comments: [...current.comments, created] }
+        : current)
+      setComment('')
+      showToast('Comment added.', 'success')
+    } catch (commentError) {
+      showToast(
+        commentError instanceof Error ? commentError.message : 'The comment could not be added.',
+        'error',
+      )
+    } finally {
+      setCommenting(false)
+    }
+  }
+
+  if (loading && !report) {
+    return (
+      <div className="admin-page">
+        <PageHeading
+          eyebrow="Report case"
+          title="Loading report…"
+          description="Fetching the latest case information."
+          backTo="/admin/reports"
+          backLabel="All reports"
+        />
+        <div className="admin-detail-layout">
+          <div><SkeletonPanel rows={8} /><SkeletonPanel rows={5} /></div>
+          <div><SkeletonPanel rows={9} /></div>
+        </div>
+      </div>
     )
-  }
-
-  function getStatusClass(
-    status: ReportStatus,
-  ) {
-    switch (status) {
-      case 'Under Review':
-        return 'text-bg-warning'
-
-      case 'In Progress':
-        return 'text-bg-primary'
-
-      case 'Resolved':
-        return 'text-bg-success'
-
-      default:
-        return 'text-bg-secondary'
-    }
-  }
-
-  function getPriorityClass(
-    priority: ReportPriority,
-  ) {
-    switch (priority) {
-      case 'Critical':
-        return 'text-bg-danger'
-
-      case 'High':
-        return 'text-bg-warning'
-
-      case 'Medium':
-        return 'text-bg-info'
-
-      case 'Low':
-        return 'text-bg-secondary'
-
-      default:
-        return 'text-bg-secondary'
-    }
   }
 
   if (!report) {
     return (
-      <div className="container-fluid py-4">
-        {loadError && <div className="alert alert-danger border-0" role="alert">{loadError}</div>}
-        <div className="card border-0 shadow-sm">
-          <div className="card-body p-4 p-md-5 text-center">
-
-            <div
-              className="rounded-circle bg-danger-subtle text-danger d-inline-flex align-items-center justify-content-center mb-3"
-              style={{
-                width: '64px',
-                height: '64px',
-              }}
-            >
-              <i
-                className="bi bi-file-earmark-x fs-3"
-                aria-hidden="true"
-              />
-            </div>
-
-            <h1 className="h4 fw-bold">
-              Report not found
-            </h1>
-
-            <p className="text-secondary mb-4">
-              We could not find a report with
-              reference{' '}
-              <strong>
-                {id || 'unknown'}
-              </strong>.
-            </p>
-
-            <Link
-              to="/admin/reports"
-              className="btn btn-primary"
-            >
-              <i className="bi bi-arrow-left me-2" />
-              Back to Reports
-            </Link>
-
-          </div>
-        </div>
+      <div className="admin-page">
+        <PageHeading
+          eyebrow="Report case"
+          title="Report unavailable"
+          description="This report could not be loaded."
+          backTo="/admin/reports"
+          backLabel="All reports"
+        />
+        <ErrorNotice message={error || 'Report not found.'} onRetry={() => void load()} />
       </div>
     )
   }
 
+  const mapLink = report.latitude !== null && report.longitude !== null
+    ? `/admin/map?report=${encodeURIComponent(report.reference)}`
+    : ''
+
   return (
-    <div className="container-fluid py-3 py-md-4">
+    <div className="admin-page">
+      <PageHeading
+        eyebrow={`Report ${report.reference}`}
+        title={report.title}
+        description={`${report.category}${report.location ? ` · ${report.location}` : ''}`}
+        backTo="/admin/reports"
+        backLabel="All reports"
+        actions={(
+          <>
+            {mapLink && (
+              <Link to={mapLink} className="admin-button ghost">
+                <i className="bi bi-geo-alt" aria-hidden="true" />
+                View on map
+              </Link>
+            )}
+            <button type="button" className="admin-button primary" onClick={() => void load()} disabled={loading}>
+              <i className={`bi bi-arrow-clockwise${loading ? ' spin' : ''}`} aria-hidden="true" />
+              Refresh
+            </button>
+          </>
+        )}
+      />
 
-      {/* ======================================================
-          PAGE HEADER
-      ====================================================== */}
+      {error && <ErrorNotice message={error} onRetry={() => void load()} />}
 
-      <div className="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-3 mb-4">
-
-        <div className="min-width-0">
-          <Link
-            to="/admin/reports"
-            className="text-decoration-none small"
-          >
-            <i className="bi bi-arrow-left me-1" />
-            Back to Reports
-          </Link>
-
-          <div className="text-primary small fw-bold text-uppercase mt-3">
-            Report Details
-          </div>
-
-          <h1 className="h3 fw-bold mb-1 text-break">
-            {report.reference}
-          </h1>
-
-          <p className="text-secondary mb-0">
-            Review report information and coordinate
-            administrative action.
-          </p>
+      <div className="admin-detail-header-bar">
+        <div className="admin-detail-badges">
+          <StatusBadge status={report.status} />
+          <PriorityBadge priority={report.priority} />
+          {report.isOverdue && (
+            <span className="admin-overdue-badge">
+              <i className="bi bi-clock-history" aria-hidden="true" />
+              Overdue
+            </span>
+          )}
         </div>
-
-        <div className="d-flex flex-wrap gap-2">
-          <span
-            className={`badge ${getPriorityClass(
-              report.priority,
-            )} px-3 py-2`}
-          >
-            {report.priority} Priority
-          </span>
-
-          <span
-            className={`badge ${getStatusClass(
-              report.status,
-            )} px-3 py-2`}
-          >
-            {report.status}
-          </span>
-        </div>
-
+        <span>
+          Updated {formatDateTime(report.updatedAt)}
+        </span>
       </div>
 
-      {/* ======================================================
-          MAIN CONTENT
-      ====================================================== */}
+      <div className="admin-detail-layout">
+        <div className="admin-detail-main">
+          <section className="admin-panel">
+            <PanelHeading title="Report details" description="What the citizen reported" />
+            <p className="admin-report-description">{report.description}</p>
 
-      <div className="row g-4">
-
-        {/* ====================================================
-            LEFT COLUMN
-        ==================================================== */}
-
-        <div className="col-12 col-xl-8">
-
-          {/* REPORT INFORMATION */}
-
-          <div className="card border-0 shadow-sm mb-4">
-            <div className="card-body p-3 p-md-4">
-
-              <div className="d-flex align-items-center gap-2 mb-4">
-                <div
-                  className="rounded bg-primary-subtle text-primary d-flex align-items-center justify-content-center"
-                  style={{
-                    width: '40px',
-                    height: '40px',
-                  }}
-                >
-                  <i className="bi bi-file-text" />
-                </div>
-
-                <div>
-                  <h2 className="h5 fw-bold mb-0">
-                    Report Information
-                  </h2>
-
-                  <div className="small text-secondary">
-                    Submitted report details
-                  </div>
-                </div>
+            <div className="admin-detail-facts">
+              <div>
+                <span>Reporter</span>
+                <b>{report.reporter?.name ?? 'Unknown'}</b>
+                <small>{report.reporter?.email ?? 'No email available'}</small>
               </div>
-
-              <div className="row g-4">
-
-                <div className="col-12 col-sm-6">
-                  <div className="text-secondary small mb-1">
-                    Category
-                  </div>
-
-                  <div className="fw-semibold">
-                    {report.category}
-                  </div>
-                </div>
-
-                <div className="col-12 col-sm-6">
-                  <div className="text-secondary small mb-1">
-                    Submitted
-                  </div>
-
-                  <div className="fw-semibold">
-                    {formatDate(report.createdAt)}
-                  </div>
-                </div>
-
-                <div className="col-12">
-                  <div className="text-secondary small mb-1">
-                    Location
-                  </div>
-
-                  <div className="fw-semibold text-break">
-                    {report.location}
-                  </div>
-
-                  {report.latitude !== null &&
-                    report.longitude !== null && (
-                      <div className="small text-secondary mt-1">
-                        <i className="bi bi-geo-alt me-1" />
-                        {report.latitude},{' '}
-                        {report.longitude}
-                      </div>
-                    )}
-                </div>
-
-                <div className="col-12">
-                  <div className="text-secondary small mb-1">
-                    Description
-                  </div>
-
-                  <div className="border rounded-3 bg-light p-3">
-                    <p className="mb-0 text-break">
-                      {report.description}
-                    </p>
-                  </div>
-                </div>
-
+              <div>
+                <span>Location</span>
+                <b>{report.location || 'Not provided'}</b>
+                <small>
+                  {report.latitude !== null && report.longitude !== null
+                    ? `${report.latitude.toFixed(5)}, ${report.longitude.toFixed(5)}`
+                    : 'No coordinates captured'}
+                </small>
+              </div>
+              <div>
+                <span>Submitted</span>
+                <b>{formatDateTime(report.createdAt)}</b>
+                <small>{report.reference}</small>
               </div>
             </div>
-          </div>
+          </section>
 
-          {/* REPORTER */}
-
-          <div className="card border-0 shadow-sm mb-4">
-            <div className="card-body p-3 p-md-4">
-
-              <h2 className="h5 fw-bold mb-4">
-                Reporter Information
-              </h2>
-
-              <div className="row g-4">
-
-                <div className="col-12 col-sm-6">
-                  <div className="text-secondary small mb-1">
-                    Name
-                  </div>
-
-                  <div className="fw-semibold text-break">
-                    {report.reporter.name}
-                  </div>
-                </div>
-
-                <div className="col-12 col-sm-6">
-                  <div className="text-secondary small mb-1">
-                    Email
-                  </div>
-
-                  <div className="fw-semibold text-break">
-                    {report.reporter.email}
-                  </div>
-                </div>
-
+          <section className="admin-panel">
+            <PanelHeading
+              title="Evidence"
+              description="Files attached by the reporter"
+              action={<span className="admin-count-pill">{report.evidence.length}</span>}
+            />
+            {report.evidence.length === 0 ? (
+              <EmptyState
+                icon="bi-paperclip"
+                title="No evidence attached"
+                text="This report was submitted without a photo or document."
+              />
+            ) : (
+              <div className="admin-evidence-grid">
+                {report.evidence.map((item) => (
+                  <EvidenceCard key={item.id ?? item.downloadUrl} item={item} />
+                ))}
               </div>
-            </div>
-          </div>
+            )}
+          </section>
 
-          {/* EVIDENCE */}
-
-          <div className="card border-0 shadow-sm">
-            <div className="card-body p-3 p-md-4">
-
-              <h2 className="h5 fw-bold mb-4">
-                Evidence
-              </h2>
-
-              {report.evidence.length > 0 ? (
-                <div className="d-flex flex-column gap-2">
-                  {report.evidence.map(
-                    (evidence) => (
-                      <div
-                        key={evidence}
-                        className="border rounded-3 p-3"
-                      >
-                        <i className="bi bi-paperclip me-2" />
-                        {evidence}
+          <section className="admin-panel">
+            <PanelHeading
+              title="Comments"
+              description="Internal updates visible to staff"
+              action={<span className="admin-count-pill">{report.comments.length}</span>}
+            />
+            {report.comments.length === 0 ? (
+              <EmptyState
+                icon="bi-chat-left-text"
+                title="No comments yet"
+                text="Add an internal note to keep the response team aligned."
+              />
+            ) : (
+              <div className="admin-comment-list">
+                {report.comments.map((item) => (
+                  <article key={item.id} className="admin-comment">
+                    <span className="admin-avatar small" aria-hidden="true">
+                      {initials(item.author?.name ?? 'Staff')}
+                    </span>
+                    <div>
+                      <div className="admin-comment-head">
+                        <b>{item.author?.name ?? 'Staff member'}</b>
+                        <span>{formatDateTime(item.createdAt)}</span>
                       </div>
-                    ),
-                  )}
+                      <p>{item.body}</p>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+
+            <form className="admin-comment-form" onSubmit={(event) => void handleComment(event)}>
+              <label htmlFor="admin-comment-body">Add a comment</label>
+              <textarea
+                id="admin-comment-body"
+                rows={3}
+                maxLength={2000}
+                placeholder="Share an update with the response team…"
+                value={comment}
+                onChange={(event) => setComment(event.target.value)}
+              />
+              <div>
+                <small>{comment.length}/2000</small>
+                <button type="submit" className="admin-button primary small" disabled={commenting || !comment.trim()}>
+                  {commenting ? <span className="admin-spinner small" aria-hidden="true" /> : <i className="bi bi-send" aria-hidden="true" />}
+                  Add comment
+                </button>
+              </div>
+            </form>
+          </section>
+
+          <section className="admin-panel">
+            <PanelHeading
+              title="Activity"
+              description="Report history and administrative changes"
+              action={<span className="admin-count-pill">{report.audit.length}</span>}
+            />
+            {report.audit.length === 0 ? (
+              <EmptyState
+                icon="bi-clock"
+                title="No activity recorded"
+                text="Changes to this report will appear here."
+              />
+            ) : (
+              <ol className="admin-timeline">
+                {report.audit.map((entry) => (
+                  <li key={entry.id}>
+                    <span className="admin-timeline-dot">
+                      <i className="bi bi-dot" aria-hidden="true" />
+                    </span>
+                    <div>
+                      <div className="admin-timeline-head">
+                        <b>{humanizeAction(entry.action)}</b>
+                        <span>{formatDateTime(entry.createdAt)}</span>
+                      </div>
+                      <small>{entry.actor?.name ?? 'System'}</small>
+                      {Object.keys(entry.details).length > 0 && (
+                        <div className="admin-timeline-details">
+                          {Object.entries(entry.details)
+                            .filter(([, value]) => value !== null && value !== undefined && typeof value !== 'object')
+                            .slice(0, 5)
+                            .map(([key, value]) => (
+                              <span key={key}>
+                                {key.replaceAll('_', ' ')}: <b>{String(value)}</b>
+                              </span>
+                            ))}
+                        </div>
+                      )}
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </section>
+        </div>
+
+        <aside className="admin-detail-side">
+          <section className="admin-panel admin-sticky-panel">
+            <PanelHeading
+              title="Triage"
+              description={canManage ? 'Update the case workflow' : 'Read-only for your role'}
+            />
+
+            <form className="admin-triage-form" onSubmit={(event) => void handleSave(event)}>
+              <label className="admin-filter-field">
+                <span>Status</span>
+                <select value={status} onChange={(event) => setStatus(event.target.value)} disabled={!canManage}>
+                  {REPORT_STATUSES.map((item) => <option key={item}>{item}</option>)}
+                </select>
+              </label>
+
+              <label className="admin-filter-field">
+                <span>Priority</span>
+                <select value={priority} onChange={(event) => setPriority(event.target.value)} disabled={!canManage}>
+                  {REPORT_PRIORITIES.map((item) => <option key={item}>{item}</option>)}
+                </select>
+              </label>
+
+              <label className="admin-filter-field">
+                <span>Department</span>
+                <select value={departmentId} onChange={(event) => setDepartmentId(event.target.value)} disabled={!canManage}>
+                  <option value="">Unassigned</option>
+                  {departments.map((department) => (
+                    <option key={department.id} value={department.id}>{department.name}</option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="admin-filter-field">
+                <span>Assigned staff</span>
+                <select value={assignedTo} onChange={(event) => setAssignedTo(event.target.value)} disabled={!canManage}>
+                  <option value="">Unassigned</option>
+                  {staff.map((member) => (
+                    <option key={member.id} value={member.id}>
+                      {member.name} · {roleLabel(member.role)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="admin-filter-field">
+                <span>SLA deadline</span>
+                <input
+                  type="datetime-local"
+                  value={slaDeadline}
+                  onChange={(event) => setSlaDeadline(event.target.value)}
+                  disabled={!canManage}
+                />
+              </label>
+
+              {saveError && <div className="admin-inline-error">{saveError}</div>}
+
+              {canManage ? (
+                <div className="admin-triage-actions">
+                  <button
+                    type="button"
+                    className="admin-button ghost"
+                    disabled={!hasChanges || saving}
+                    onClick={() => applyForm(report)}
+                  >
+                    Reset
+                  </button>
+                  <button type="submit" className="admin-button primary" disabled={!hasChanges || saving}>
+                    {saving ? <span className="admin-spinner small" aria-hidden="true" /> : <i className="bi bi-check2" aria-hidden="true" />}
+                    Save changes
+                  </button>
                 </div>
               ) : (
-                <div className="text-secondary">
-                  No evidence files were submitted.
-                </div>
+                <p className="admin-permission-note">
+                  <i className="bi bi-lock" aria-hidden="true" />
+                  Your role can view and comment, but not change workflow fields.
+                </p>
               )}
+            </form>
+          </section>
 
-            </div>
-          </div>
-
-        </div>
-
-        {/* ====================================================
-            RIGHT COLUMN
-        ==================================================== */}
-
-        <div className="col-12 col-xl-4">
-
-          {/* ADMINISTRATIVE ACTION */}
-
-          <div className="card border-0 shadow-sm mb-4">
-            <div className="card-body p-3 p-md-4">
-
-              <h2 className="h5 fw-bold mb-1">
-                Administrative Action
-              </h2>
-
-              <p className="small text-secondary mb-4">
-                Review and update the operational
-                state of this report.
-              </p>
-
-              <div className="mb-3">
-                <label
-                  htmlFor="report-status"
-                  className="form-label fw-semibold"
-                >
-                  Status
-                </label>
-
-                <select
-                  id="report-status"
-                  className="form-select"
-                  value={status}
-                  onChange={(event) => {
-                    setStatus(event.target.value as ReportStatus)
-                    setSaved(false)
-                  }}
-                >
-                  <option>
-                    Under Review
-                  </option>
-
-                  <option>
-                    In Progress
-                  </option>
-
-                  <option>
-                    Resolved
-                  </option>
-                </select>
-              </div>
-
-              <div className="mb-3">
-                <label
-                  htmlFor="report-priority"
-                  className="form-label fw-semibold"
-                >
-                  Priority
-                </label>
-
-                <select
-                  id="report-priority"
-                  className="form-select"
-                  value={priority}
-                  onChange={(event) => {
-                    setPriority(event.target.value as ReportPriority)
-                    setSaved(false)
-                  }}
-                >
-                  <option>Critical</option>
-                  <option>High</option>
-                  <option>Medium</option>
-                  <option>Low</option>
-                </select>
-              </div>
-
-              <button
-                type="button"
-                className="btn btn-primary w-100"
-                onClick={saveChanges}
-                disabled={saving}
-              >
-                <i className="bi bi-check2-circle me-2" />
-                {saving ? 'Saving...' : 'Save Changes'}
-              </button>
-              {saved && (
-                <div className="small text-success text-center mt-3" role="status">
-                  <i className="bi bi-check-circle me-1" aria-hidden="true" />
-                  Changes saved for this session.
-                </div>
-              )}
-
-            </div>
-          </div>
-
-          {/* ASSIGNMENT */}
-
-          <div className="card border-0 shadow-sm mb-4">
-            <div className="card-body p-3 p-md-4">
-
-              <h2 className="h5 fw-bold mb-4">
-                Assignment
-              </h2>
-
-              <div className="mb-3">
-                <div className="text-secondary small mb-1">
-                  Department
-                </div>
-
-                <div className="fw-semibold text-break">
-                  {report.department ||
-                    'Not assigned'}
-                </div>
-              </div>
-
+          <section className="admin-panel">
+            <PanelHeading title="Assignment" />
+            <div className="admin-side-facts">
               <div>
-                <div className="text-secondary small mb-1">
-                  Assigned To
-                </div>
-
-                <div className="fw-semibold text-break">
-                  {report.assignedTo ||
-                    'Not assigned'}
-                </div>
+                <span>Department</span>
+                <b>{report.department?.name ?? 'Unassigned'}</b>
               </div>
-
-            </div>
-          </div>
-
-          {/* ADMINISTRATIVE NOTE */}
-
-          <div className="card border-0 shadow-sm">
-            <div className="card-body p-3 p-md-4">
-
-              <h2 className="h5 fw-bold mb-3">
-                Administrative Note
-              </h2>
-
-              <div className="border rounded-3 bg-light p-3">
-                {report.administrativeNote ? (
-                  <p className="mb-0 text-break">
-                    {report.administrativeNote}
-                  </p>
-                ) : (
-                  <span className="text-secondary">
-                    No administrative note has been
-                    added.
-                  </span>
-                )}
+              <div>
+                <span>Assigned to</span>
+                <b>{report.assignedTo?.name ?? 'Unassigned'}</b>
+                {report.assignedTo?.email && <small>{report.assignedTo.email}</small>}
               </div>
-
+              <div>
+                <span>SLA deadline</span>
+                <b>{formatDateTime(report.slaDeadline)}</b>
+              </div>
+              <div>
+                <span>Last updated</span>
+                <b>{formatDateTime(report.updatedAt)}</b>
+              </div>
             </div>
-          </div>
-
-        </div>
+          </section>
+        </aside>
       </div>
     </div>
   )

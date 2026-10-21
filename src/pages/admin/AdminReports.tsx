@@ -1,1168 +1,425 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
 
-import { getReportsFromApi } from '../../services/apiClient'
+import {
+  EmptyState,
+  ErrorNotice,
+  PageHeading,
+  Pagination,
+  PanelHeading,
+  PriorityBadge,
+  SkeletonPanel,
+  StatusBadge,
+  formatDateTime,
+  formatRelative,
+} from '../../components/admin/AdminUi'
+import { getDepartments, getReports } from '../../services/adminApi'
+import {
+  REPORT_CATEGORIES,
+  REPORT_PRIORITIES,
+  REPORT_STATUSES,
+  type DepartmentRecord,
+  type PaginationMeta,
+  type ReportSummary,
+} from '../../types/adminPanel'
 
-import type {
-  Report,
-  ReportPriority,
-  ReportStatus,
-} from '../../types/report'
-
-/*
- * ============================================================
- * FILTER TYPES
- * ============================================================
- */
-
-type StatusFilter = 'All' | ReportStatus
-type PriorityFilter = 'All' | ReportPriority
-
-/*
- * ============================================================
- * STATUS BADGE
- * ============================================================
- */
-
-function getStatusClass(status: ReportStatus): string {
-  switch (status) {
-    case 'Under Review':
-      return 'warning'
-
-    case 'In Progress':
-      return 'primary'
-
-    case 'Resolved':
-      return 'success'
-
-    default:
-      return 'secondary'
-  }
+const EMPTY_META: PaginationMeta = {
+  page: 1,
+  pageSize: 20,
+  total: 0,
+  totalPages: 0,
 }
 
-/*
- * ============================================================
- * PRIORITY BADGE
- * ============================================================
- */
-
-function getPriorityClass(
-  priority: ReportPriority,
-): string {
-  switch (priority) {
-    case 'Critical':
-      return 'danger'
-
-    case 'High':
-      return 'warning'
-
-    case 'Medium':
-      return 'primary'
-
-    case 'Low':
-      return 'secondary'
-
-    default:
-      return 'secondary'
-  }
+function escapeCsv(value: string | number | null | undefined): string {
+  const text = value === null || value === undefined ? '' : String(value)
+  return `"${text.replaceAll('"', '""')}"`
 }
-
-/*
- * ============================================================
- * DATE FORMATTER
- * ============================================================
- */
-
-function formatDate(date: string): string {
-  const parsedDate = new Date(date)
-
-  if (Number.isNaN(parsedDate.getTime())) {
-    return 'Date unavailable'
-  }
-
-  return parsedDate.toLocaleDateString(
-    undefined,
-    {
-      dateStyle: 'medium',
-    },
-  )
-}
-
-/*
- * ============================================================
- * ADMIN REPORTS
- * ============================================================
- */
 
 function AdminReports() {
-  /*
-   * ----------------------------------------------------------
-   * REPORT DATA
-   * ----------------------------------------------------------
-   */
-
-  const [reports, setReports] = useState<Report[]>([])
-  const [loadError, setLoadError] = useState('')
+  const [searchParams] = useSearchParams()
+  const [search, setSearch] = useState(searchParams.get('search') ?? '')
+  const [status, setStatus] = useState(searchParams.get('status') ?? '')
+  const [priority, setPriority] = useState(searchParams.get('priority') ?? '')
+  const [category, setCategory] = useState(searchParams.get('category') ?? '')
+  const [departmentId, setDepartmentId] = useState(searchParams.get('departmentId') ?? '')
+  const [overdue, setOverdue] = useState(searchParams.get('overdue') ?? '')
+  const [dateFrom, setDateFrom] = useState(searchParams.get('dateFrom') ?? '')
+  const [dateTo, setDateTo] = useState(searchParams.get('dateTo') ?? '')
+  const [page, setPage] = useState(1)
+  const [reports, setReports] = useState<ReportSummary[]>([])
+  const [meta, setMeta] = useState<PaginationMeta>(EMPTY_META)
+  const [departments, setDepartments] = useState<DepartmentRecord[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
 
   useEffect(() => {
-    getReportsFromApi()
-      .then(setReports)
-      .catch((error: unknown) => {
-        setLoadError(error instanceof Error ? error.message : 'Unable to load reports.')
-      })
+    getDepartments()
+      .then(setDepartments)
+      .catch(() => setDepartments([]))
   }, [])
 
-  /*
-   * ----------------------------------------------------------
-   * FILTER STATE
-   * ----------------------------------------------------------
-   */
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError('')
 
-  const [searchTerm, setSearchTerm] =
-    useState('')
+    try {
+      const result = await getReports({
+        search: search.trim(),
+        status,
+        priority,
+        category,
+        departmentId,
+        overdue,
+        dateFrom,
+        dateTo,
+        page: String(page),
+        pageSize: '15',
+        sortBy: 'created_at',
+        sortDir: 'desc',
+      })
 
-  const [statusFilter, setStatusFilter] =
-    useState<StatusFilter>('All')
+      setReports(result.data)
+      setMeta(result.meta)
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Unable to load reports.')
+    } finally {
+      setLoading(false)
+    }
+  }, [search, status, priority, category, departmentId, overdue, dateFrom, dateTo, page])
 
-  const [priorityFilter, setPriorityFilter] =
-    useState<PriorityFilter>('All')
+  useEffect(() => {
+    const delay = search ? 300 : 0
+    const timer = window.setTimeout(() => {
+      void load()
+    }, delay)
 
-  /*
-   * ----------------------------------------------------------
-   * SUMMARY STATISTICS
-   * ----------------------------------------------------------
-   */
+    return () => window.clearTimeout(timer)
+  }, [load, search])
 
-  const totalReports =
-    reports.length
+  const activeFilterCount = [
+    search.trim(),
+    status,
+    priority,
+    category,
+    departmentId,
+    overdue,
+    dateFrom,
+    dateTo,
+  ].filter(Boolean).length
 
-  const criticalCount =
-    reports.filter(
-      (report) =>
-        report.priority === 'Critical',
-    ).length
+  const pageLabel = useMemo(() => {
+    if (meta.total === 0) {
+      return 'No reports match these filters'
+    }
 
-  const underReviewCount =
-    reports.filter(
-      (report) =>
-        report.status === 'Under Review',
-    ).length
+    return `${meta.total} report${meta.total === 1 ? '' : 's'} found`
+  }, [meta.total])
 
-  const inProgressCount =
-    reports.filter(
-      (report) =>
-        report.status === 'In Progress',
-    ).length
-
-  const resolvedCount =
-    reports.filter(
-      (report) =>
-        report.status === 'Resolved',
-    ).length
-
-  const mappedCount =
-    reports.filter(
-      (report) =>
-        typeof report.latitude === 'number' &&
-        Number.isFinite(report.latitude) &&
-        typeof report.longitude === 'number' &&
-        Number.isFinite(report.longitude),
-    ).length
-
-  /*
-   * ----------------------------------------------------------
-   * RESOLUTION RATE
-   * ----------------------------------------------------------
-   */
-
-  const resolutionRate =
-    totalReports === 0
-      ? 0
-      : Math.round(
-          (resolvedCount / totalReports) * 100,
-        )
-
-  /*
-   * ----------------------------------------------------------
-   * FILTER REPORTS
-   * ----------------------------------------------------------
-   */
-
-  const filteredReports = useMemo(() => {
-    const normalizedSearch =
-      searchTerm
-        .trim()
-        .toLowerCase()
-
-    return reports.filter((report) => {
-      const reference =
-        String(
-          report.reference ?? '',
-        ).toLowerCase()
-
-      const category =
-        String(
-          report.category ?? '',
-        ).toLowerCase()
-
-      const location =
-        String(
-          report.location ?? '',
-        ).toLowerCase()
-
-      const description =
-        String(
-          report.description ?? '',
-        ).toLowerCase()
-
-      const matchesSearch =
-        normalizedSearch === '' ||
-        reference.includes(
-          normalizedSearch,
-        ) ||
-        category.includes(
-          normalizedSearch,
-        ) ||
-        location.includes(
-          normalizedSearch,
-        ) ||
-        description.includes(
-          normalizedSearch,
-        )
-
-      const matchesStatus =
-        statusFilter === 'All' ||
-        report.status === statusFilter
-
-      const matchesPriority =
-        priorityFilter === 'All' ||
-        report.priority === priorityFilter
-
-      return (
-        matchesSearch &&
-        matchesStatus &&
-        matchesPriority
-      )
-    })
-  }, [
-    reports,
-    searchTerm,
-    statusFilter,
-    priorityFilter,
-  ])
-
-  /*
-   * ----------------------------------------------------------
-   * FILTER STATE
-   * ----------------------------------------------------------
-   */
-
-  const hasActiveFilters =
-    searchTerm.trim() !== '' ||
-    statusFilter !== 'All' ||
-    priorityFilter !== 'All'
-
-  /*
-   * ----------------------------------------------------------
-   * CLEAR FILTERS
-   * ----------------------------------------------------------
-   */
-
-  const clearFilters = () => {
-    setSearchTerm('')
-    setStatusFilter('All')
-    setPriorityFilter('All')
+  function clearFilters() {
+    setSearch('')
+    setStatus('')
+    setPriority('')
+    setCategory('')
+    setDepartmentId('')
+    setOverdue('')
+    setDateFrom('')
+    setDateTo('')
+    setPage(1)
   }
 
-  /*
-   * ----------------------------------------------------------
-   * RENDER
-   * ----------------------------------------------------------
-   */
+  function exportCsv() {
+    const header = [
+      'Reference',
+      'Title',
+      'Category',
+      'Status',
+      'Priority',
+      'Department',
+      'Reporter',
+      'Location',
+      'SLA deadline',
+      'Created at',
+    ]
+    const rows = reports.map((report) => [
+      report.reference,
+      report.title,
+      report.category,
+      report.status,
+      report.priority,
+      report.department?.name ?? '',
+      report.reporter?.name ?? '',
+      report.location ?? '',
+      report.slaDeadline ?? '',
+      report.createdAt,
+    ])
+    const csv = [header, ...rows]
+      .map((row) => row.map(escapeCsv).join(','))
+      .join('\r\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+
+    link.href = url
+    link.download = `reporthub-reports-${new Date().toISOString().slice(0, 10)}.csv`
+    link.click()
+    URL.revokeObjectURL(url)
+  }
 
   return (
-    <div className="container-fluid px-0">
-      {loadError && (
-        <div className="alert alert-warning border-0" role="status">
-          {loadError} Showing local records until the API is available.
-        </div>
-      )}
-
-      {/* ====================================================
-          PAGE HEADER
-      ==================================================== */}
-
-      <div className="d-flex flex-column flex-xl-row justify-content-between align-items-xl-center gap-3 mb-4">
-
-        <div className="min-width-0">
-
-          <div className="text-primary small fw-bold text-uppercase mb-1">
-            Operations
-          </div>
-
-          <h1 className="h2 fw-bold mb-2">
-            Reports Management
-          </h1>
-
-          <p className="text-secondary mb-0">
-            Review, prioritize, assign, and
-            manage citizen infrastructure
-            reports.
-          </p>
-
-        </div>
-
-        <div className="d-flex flex-wrap gap-2">
-
-          <Link
-            to="/admin/map"
-            className="btn btn-outline-primary"
-          >
-            <i
-              className="bi bi-geo-alt me-2"
-              aria-hidden="true"
-            />
-            Map Monitoring
-          </Link>
-
-          <Link
-            to="/admin/analytics"
-            className="btn btn-primary"
-          >
-            <i
-              className="bi bi-bar-chart-line me-2"
-              aria-hidden="true"
-            />
-            Analytics
-          </Link>
-
-        </div>
-
-      </div>
-
-      {/* ====================================================
-          MAIN KPI CARDS
-      ==================================================== */}
-
-      <div className="row g-3 mb-4">
-
-        <MetricCard
-          label="Total Reports"
-          value={totalReports}
-          icon="bi-file-earmark-text"
-          iconClass="text-primary"
-        />
-
-        <MetricCard
-          label="Critical"
-          value={criticalCount}
-          icon="bi-exclamation-triangle"
-          iconClass="text-danger"
-          footer={
-            criticalCount > 0
-              ? 'Requires attention'
-              : 'No critical reports'
-          }
-        />
-
-        <MetricCard
-          label="Under Review"
-          value={underReviewCount}
-          icon="bi-hourglass-split"
-          iconClass="text-warning"
-        />
-
-        <MetricCard
-          label="Resolved"
-          value={resolvedCount}
-          icon="bi-check-circle"
-          iconClass="text-success"
-          footer={`${resolutionRate}% resolution rate`}
-        />
-
-      </div>
-
-      {/* ====================================================
-          SECONDARY METRICS
-      ==================================================== */}
-
-      <div className="row g-3 mb-4">
-
-        <SmallMetricCard
-          label="In Progress"
-          value={inProgressCount}
-          icon="bi-arrow-repeat"
-          iconClass="text-primary"
-        />
-
-        <SmallMetricCard
-          label="Mapped Reports"
-          value={mappedCount}
-          icon="bi-geo-alt"
-          iconClass="text-success"
-        />
-
-        <SmallMetricCard
-          label="Visible Results"
-          value={filteredReports.length}
-          icon="bi-filter"
-          iconClass="text-secondary"
-        />
-
-        <SmallMetricCard
-          label="Resolution Rate"
-          value={resolutionRate}
-          suffix="%"
-          icon="bi-graph-up"
-          iconClass="text-success"
-        />
-
-      </div>
-
-      {/* ====================================================
-          REPORT MANAGEMENT CARD
-      ==================================================== */}
-
-      <div className="card border-0 shadow-sm">
-
-        {/* ==================================================
-            CARD HEADER
-        ================================================== */}
-
-        <div className="card-header bg-white border-0 p-3 p-md-4">
-
-          <div className="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-3">
-
-            <div>
-
-              <h2 className="h5 fw-bold mb-1">
-                All Reports
-              </h2>
-
-              <div className="small text-secondary">
-                Showing{' '}
-                <span className="fw-semibold text-dark">
-                  {filteredReports.length}
-                </span>{' '}
-                of{' '}
-                <span className="fw-semibold text-dark">
-                  {totalReports}
-                </span>{' '}
-                reports
-              </div>
-
-            </div>
-
-            {hasActiveFilters && (
-              <button
-                type="button"
-                className="btn btn-sm btn-outline-secondary align-self-start"
-                onClick={clearFilters}
-              >
-                <i
-                  className="bi bi-x-circle me-1"
-                  aria-hidden="true"
-                />
-                Clear Filters
-              </button>
-            )}
-
-          </div>
-
-        </div>
-
-        {/* ==================================================
-            FILTER BAR
-        ================================================== */}
-
-        <div className="border-top border-bottom bg-light-subtle p-3 p-md-4">
-
-          <div className="row g-3">
-
-            {/* SEARCH */}
-
-            <div className="col-12 col-lg-6">
-
-              <label
-                htmlFor="reportSearch"
-                className="form-label small fw-semibold"
-              >
-                Search reports
-              </label>
-
-              <div className="input-group">
-
-                <span
-                  className="input-group-text bg-white"
-                  aria-hidden="true"
-                >
-                  <i className="bi bi-search" />
-                </span>
-
-                <input
-                  id="reportSearch"
-                  type="search"
-                  className="form-control"
-                  placeholder="Reference, category, location, or description..."
-                  value={searchTerm}
-                  onChange={(event) =>
-                    setSearchTerm(
-                      event.target.value,
-                    )
-                  }
-                  aria-label="Search reports"
-                />
-
-                {searchTerm && (
-                  <button
-                    type="button"
-                    className="btn btn-outline-secondary"
-                    onClick={() =>
-                      setSearchTerm('')
-                    }
-                    aria-label="Clear search"
-                  >
-                    <i
-                      className="bi bi-x-lg"
-                      aria-hidden="true"
-                    />
-                  </button>
-                )}
-
-              </div>
-
-            </div>
-
-            {/* STATUS */}
-
-            <div className="col-12 col-md-6 col-lg-3">
-
-              <label
-                htmlFor="statusFilter"
-                className="form-label small fw-semibold"
-              >
-                Status
-              </label>
-
-              <select
-                id="statusFilter"
-                className="form-select"
-                value={statusFilter}
-                onChange={(event) =>
-                  setStatusFilter(
-                    event.target
-                      .value as StatusFilter,
-                  )
-                }
-              >
-
-                <option value="All">
-                  All statuses
-                </option>
-
-                <option value="Under Review">
-                  Under Review
-                </option>
-
-                <option value="In Progress">
-                  In Progress
-                </option>
-
-                <option value="Resolved">
-                  Resolved
-                </option>
-
-              </select>
-
-            </div>
-
-            {/* PRIORITY */}
-
-            <div className="col-12 col-md-6 col-lg-3">
-
-              <label
-                htmlFor="priorityFilter"
-                className="form-label small fw-semibold"
-              >
-                Priority
-              </label>
-
-              <select
-                id="priorityFilter"
-                className="form-select"
-                value={priorityFilter}
-                onChange={(event) =>
-                  setPriorityFilter(
-                    event.target
-                      .value as PriorityFilter,
-                  )
-                }
-              >
-
-                <option value="All">
-                  All priorities
-                </option>
-
-                <option value="Critical">
-                  Critical
-                </option>
-
-                <option value="High">
-                  High
-                </option>
-
-                <option value="Medium">
-                  Medium
-                </option>
-
-                <option value="Low">
-                  Low
-                </option>
-
-              </select>
-
-            </div>
-
-          </div>
-
-        </div>
-
-        {/* ==================================================
-            ACTIVE FILTER SUMMARY
-        ================================================== */}
-
-        {hasActiveFilters && (
-          <div className="px-3 px-md-4 py-3 border-bottom bg-white">
-
-            <div className="d-flex flex-wrap align-items-center gap-2">
-
-              <span className="small fw-semibold text-secondary">
-                Active filters:
-              </span>
-
-              {searchTerm.trim() !== '' && (
-                <span className="badge text-bg-light border">
-                  Search: "{searchTerm.trim()}"
-                </span>
-              )}
-
-              {statusFilter !== 'All' && (
-                <span className="badge text-bg-light border">
-                  Status: {statusFilter}
-                </span>
-              )}
-
-              {priorityFilter !== 'All' && (
-                <span className="badge text-bg-light border">
-                  Priority: {priorityFilter}
-                </span>
-              )}
-
-            </div>
-
-          </div>
+    <div className="admin-page">
+      <PageHeading
+        eyebrow="Case management"
+        title="Reports"
+        description="Search, filter, and triage every citizen report across the city."
+        actions={(
+          <>
+            <button
+              type="button"
+              className="admin-button ghost"
+              onClick={exportCsv}
+              disabled={reports.length === 0}
+            >
+              <i className="bi bi-download" aria-hidden="true" />
+              Export page
+            </button>
+            <button
+              type="button"
+              className="admin-button primary"
+              onClick={() => void load()}
+              disabled={loading}
+            >
+              <i className={`bi bi-arrow-clockwise${loading ? ' spin' : ''}`} aria-hidden="true" />
+              Refresh
+            </button>
+          </>
         )}
-
-        {/* ==================================================
-            TABLE
-        ================================================== */}
-
-        <div className="card-body p-0">
-
-          {filteredReports.length === 0 ? (
-
-            <EmptyState
-              hasActiveFilters={
-                hasActiveFilters
-              }
-              onClear={clearFilters}
-            />
-
-          ) : (
-
-            <div className="table-responsive">
-
-              <table className="table table-hover align-middle mb-0">
-
-                <thead className="table-light">
-
-                  <tr>
-
-                    <th className="ps-3 ps-md-4 text-nowrap">
-                      Reference
-                    </th>
-
-                    <th className="text-nowrap">
-                      Report
-                    </th>
-
-                    <th className="text-nowrap">
-                      Location
-                    </th>
-
-                    <th className="text-nowrap">
-                      Status
-                    </th>
-
-                    <th className="text-nowrap">
-                      Priority
-                    </th>
-
-                    <th className="text-nowrap">
-                      Submitted
-                    </th>
-
-                    <th className="text-end pe-3 pe-md-4">
-                      Action
-                    </th>
-
-                  </tr>
-
-                </thead>
-
-                <tbody>
-
-                  {filteredReports.map(
-                    (report: Report) => {
-
-                      const hasCoordinates =
-                        typeof report.latitude ===
-                          'number' &&
-                        Number.isFinite(
-                          report.latitude,
-                        ) &&
-                        typeof report.longitude ===
-                          'number' &&
-                        Number.isFinite(
-                          report.longitude,
-                        )
-
-                      return (
-                        <tr
-                          key={
-                            report.reference
-                          }
-                        >
-
-                          {/* REFERENCE */}
-
-                          <td className="ps-3 ps-md-4">
-
-                            <Link
-                              to={`/admin/reports/${encodeURIComponent(
-                                report.reference,
-                              )}`}
-                              className="fw-bold font-monospace text-decoration-none"
-                              title="Open report details"
-                            >
-                              {
-                                report.reference
-                              }
-                            </Link>
-
-                          </td>
-
-                          {/* REPORT */}
-
-                          <td>
-
-                            <div className="fw-semibold">
-                              {
-                                report.category
-                              }
-                            </div>
-
-                            <div
-                              className="small text-secondary text-truncate"
-                              style={{
-                                maxWidth:
-                                  '260px',
-                              }}
-                              title={
-                                report.description
-                              }
-                            >
-                              {
-                                report.description
-                              }
-                            </div>
-
-                          </td>
-
-                          {/* LOCATION */}
-
-                          <td>
-
-                            <div className="d-flex align-items-center gap-2">
-
-                              <i
-                                className="bi bi-geo-alt text-secondary flex-shrink-0"
-                                aria-hidden="true"
-                              />
-
-                              <span
-                                className="text-truncate"
-                                style={{
-                                  maxWidth:
-                                    '180px',
-                                }}
-                                title={
-                                  report.location
-                                }
-                              >
-                                {
-                                  report.location
-                                }
-                              </span>
-
-                            </div>
-
-                          </td>
-
-                          {/* STATUS */}
-
-                          <td>
-
-                            <span
-                              className={`badge text-bg-${getStatusClass(
-                                report.status,
-                              )}`}
-                            >
-                              {
-                                report.status
-                              }
-                            </span>
-
-                          </td>
-
-                          {/* PRIORITY */}
-
-                          <td>
-
-                            <span
-                              className={`badge text-bg-${getPriorityClass(
-                                report.priority,
-                              )}`}
-                            >
-                              {
-                                report.priority
-                              }
-                            </span>
-
-                          </td>
-
-                          {/* DATE */}
-
-                          <td className="text-secondary small text-nowrap">
-
-                            {formatDate(
-                              report.createdAt,
-                            )}
-
-                          </td>
-
-                          {/* ACTION */}
-
-                          <td className="text-end pe-3 pe-md-4">
-
-                            <div className="d-flex justify-content-end gap-2">
-
-                              <Link
-                                to={`/admin/reports/${encodeURIComponent(
-                                  report.reference,
-                                )}`}
-                                className="btn btn-sm btn-outline-primary"
-                                title="View report details"
-                                aria-label={`View ${report.reference}`}
-                              >
-                                <i
-                                  className="bi bi-eye me-1"
-                                  aria-hidden="true"
-                                />
-
-                                <span className="d-none d-md-inline">
-                                  View
-                                </span>
-
-                              </Link>
-
-                              {hasCoordinates && (
-                                <Link
-                                  to={`/admin/map?reference=${encodeURIComponent(
-                                    report.reference,
-                                  )}`}
-                                  className="btn btn-sm btn-outline-secondary"
-                                  title="View report on map"
-                                  aria-label={`View ${report.reference} on map`}
-                                >
-                                  <i
-                                    className="bi bi-geo-alt"
-                                    aria-hidden="true"
-                                  />
-                                </Link>
-                              )}
-
-                            </div>
-
-                          </td>
-
-                        </tr>
-                      )
-                    },
-                  )}
-
-                </tbody>
-
-              </table>
-
-            </div>
-
+      />
+
+      <section className="admin-panel admin-filter-panel">
+        <div className="admin-search-field">
+          <i className="bi bi-search" aria-hidden="true" />
+          <input
+            type="search"
+            placeholder="Search reference or title…"
+            value={search}
+            onChange={(event) => {
+              setSearch(event.target.value)
+              setPage(1)
+            }}
+            aria-label="Search reports"
+          />
+          {search && (
+            <button type="button" onClick={() => setSearch('')} aria-label="Clear search">
+              <i className="bi bi-x-circle" aria-hidden="true" />
+            </button>
           )}
-
         </div>
 
-        {/* ==================================================
-            FOOTER
-        ================================================== */}
+        <div className="admin-filter-grid">
+          <label className="admin-filter-field">
+            <span>Status</span>
+            <select
+              value={status}
+              onChange={(event) => {
+                setStatus(event.target.value)
+                setPage(1)
+              }}
+            >
+              <option value="">All statuses</option>
+              {REPORT_STATUSES.map((item) => <option key={item}>{item}</option>)}
+            </select>
+          </label>
 
-        {filteredReports.length > 0 && (
-          <div className="card-footer bg-white border-0 p-3 p-md-4">
+          <label className="admin-filter-field">
+            <span>Priority</span>
+            <select
+              value={priority}
+              onChange={(event) => {
+                setPriority(event.target.value)
+                setPage(1)
+              }}
+            >
+              <option value="">All priorities</option>
+              {REPORT_PRIORITIES.map((item) => <option key={item}>{item}</option>)}
+            </select>
+          </label>
 
-            <div className="d-flex flex-column flex-sm-row justify-content-between align-items-sm-center gap-2">
+          <label className="admin-filter-field">
+            <span>Category</span>
+            <select
+              value={category}
+              onChange={(event) => {
+                setCategory(event.target.value)
+                setPage(1)
+              }}
+            >
+              <option value="">All categories</option>
+              {REPORT_CATEGORIES.map((item) => <option key={item}>{item}</option>)}
+            </select>
+          </label>
 
-              <div className="small text-secondary">
+          <label className="admin-filter-field">
+            <span>Department</span>
+            <select
+              value={departmentId}
+              onChange={(event) => {
+                setDepartmentId(event.target.value)
+                setPage(1)
+              }}
+            >
+              <option value="">All departments</option>
+              {departments.map((department) => (
+                <option key={department.id} value={department.id}>{department.name}</option>
+              ))}
+            </select>
+          </label>
 
-                Showing{' '}
-                <span className="fw-semibold text-dark">
-                  {filteredReports.length}
-                </span>{' '}
-                matching report
-                {filteredReports.length !==
-                1
-                  ? 's'
-                  : ''}
+          <label className="admin-filter-field">
+            <span>SLA</span>
+            <select
+              value={overdue}
+              onChange={(event) => {
+                setOverdue(event.target.value)
+                setPage(1)
+              }}
+            >
+              <option value="">All deadlines</option>
+              <option value="true">Overdue only</option>
+              <option value="false">Within SLA</option>
+            </select>
+          </label>
 
-              </div>
-
-              <div className="small text-secondary">
-
-                {hasActiveFilters
-                  ? 'Filters are currently active.'
-                  : 'Use filters to narrow the operational workload.'}
-
-              </div>
-
-            </div>
-
-          </div>
-        )}
-
-      </div>
-
-      {/* ====================================================
-          ADMINISTRATIVE NOTE
-      ==================================================== */}
-
-      <div className="alert alert-info border-0 mt-4 mb-0">
-
-        <div className="d-flex gap-3">
-
-          <i
-            className="bi bi-info-circle fs-5 flex-shrink-0"
-            aria-hidden="true"
-          />
-
-          <div>
-
-            <div className="fw-semibold">
-              Administrative review
-            </div>
-
-            <div className="small mt-1">
-              Report prioritization, assignment,
-              and operational actions remain under
-              administrator control. This interface
-              supports review, coordination, and
-              decision-making rather than making
-              autonomous operational decisions.
-            </div>
-
-          </div>
-
-        </div>
-
-      </div>
-
-    </div>
-  )
-}
-
-/*
- * ============================================================
- * METRIC CARD
- * ============================================================
- */
-
-function MetricCard({
-  label,
-  value,
-  icon,
-  iconClass,
-  footer,
-}: {
-  label: string
-  value: number
-  icon: string
-  iconClass: string
-  footer?: string
-}) {
-  return (
-    <div className="col-6 col-xl-3">
-
-      <div className="card border-0 shadow-sm h-100">
-
-        <div className="card-body p-3 p-md-4">
-
-          <div className="d-flex justify-content-between align-items-start gap-3">
-
-            <div className="min-width-0">
-
-              <div className="small text-secondary">
-                {label}
-              </div>
-
-              <div className="display-6 fw-bold mt-1">
-                {value}
-              </div>
-
-              {footer && (
-                <div className="small text-secondary mt-1">
-                  {footer}
-                </div>
-              )}
-
-            </div>
-
-            <i
-              className={`bi ${icon} ${iconClass} fs-4 flex-shrink-0`}
-              aria-hidden="true"
+          <label className="admin-filter-field">
+            <span>From</span>
+            <input
+              type="date"
+              value={dateFrom}
+              onChange={(event) => {
+                setDateFrom(event.target.value)
+                setPage(1)
+              }}
             />
+          </label>
 
-          </div>
-
-        </div>
-
-      </div>
-
-    </div>
-  )
-}
-
-/*
- * ============================================================
- * SMALL METRIC CARD
- * ============================================================
- */
-
-function SmallMetricCard({
-  label,
-  value,
-  suffix = '',
-  icon,
-  iconClass,
-}: {
-  label: string
-  value: number
-  suffix?: string
-  icon: string
-  iconClass: string
-}) {
-  return (
-    <div className="col-6 col-md-3">
-
-      <div className="card border-0 shadow-sm h-100">
-
-        <div className="card-body p-3">
-
-          <div className="d-flex justify-content-between align-items-center gap-2">
-
-            <div className="min-width-0">
-
-              <div className="small text-secondary">
-                {label}
-              </div>
-
-              <div className="h4 fw-bold mb-0 mt-1">
-                {value}
-                {suffix}
-              </div>
-
-            </div>
-
-            <i
-              className={`bi ${icon} ${iconClass} fs-5 flex-shrink-0`}
-              aria-hidden="true"
+          <label className="admin-filter-field">
+            <span>To</span>
+            <input
+              type="date"
+              value={dateTo}
+              min={dateFrom || undefined}
+              onChange={(event) => {
+                setDateTo(event.target.value)
+                setPage(1)
+              }}
             />
+          </label>
 
-          </div>
-
+          <button
+            type="button"
+            className="admin-filter-clear"
+            onClick={clearFilters}
+            disabled={activeFilterCount === 0}
+          >
+            <i className="bi bi-x-lg" aria-hidden="true" />
+            Clear{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}
+          </button>
         </div>
+      </section>
 
-      </div>
+      {error && <ErrorNotice message={error} onRetry={() => void load()} />}
 
-    </div>
-  )
-}
-
-/*
- * ============================================================
- * EMPTY STATE
- * ============================================================
- */
-
-function EmptyState({
-  hasActiveFilters,
-  onClear,
-}: {
-  hasActiveFilters: boolean
-  onClear: () => void
-}) {
-  return (
-    <div className="text-center p-5">
-
-      <div className="text-secondary mb-3">
-
-        <i
-          className="bi bi-inbox fs-1"
-          aria-hidden="true"
+      <section className="admin-panel admin-table-panel">
+        <PanelHeading
+          title="All reports"
+          description={pageLabel}
+          action={(
+            <span className="admin-panel-chip">
+              <i className="bi bi-funnel" aria-hidden="true" />
+              {activeFilterCount > 0 ? `${activeFilterCount} active filter${activeFilterCount === 1 ? '' : 's'}` : 'No filters'}
+            </span>
+          )}
         />
 
-      </div>
-
-      <h3 className="h5 fw-bold">
-        No reports found
-      </h3>
-
-      <p className="text-secondary mb-3">
-        {hasActiveFilters
-          ? 'No reports match your current search or filters.'
-          : 'There are currently no reports available.'}
-      </p>
-
-      {hasActiveFilters && (
-        <button
-          type="button"
-          className="btn btn-outline-primary"
-          onClick={onClear}
-        >
-          <i
-            className="bi bi-arrow-counterclockwise me-1"
-            aria-hidden="true"
+        {loading && reports.length === 0 ? (
+          <SkeletonPanel rows={8} />
+        ) : reports.length === 0 ? (
+          <EmptyState
+            icon="bi-search"
+            title="No reports match"
+            text="Try adjusting the search or clearing one of the active filters."
+            action={activeFilterCount > 0 ? (
+              <button type="button" className="admin-button ghost" onClick={clearFilters}>
+                Clear filters
+              </button>
+            ) : undefined}
           />
-          Clear Filters
-        </button>
-      )}
+        ) : (
+          <>
+            <div className={`admin-table-wrap${loading ? ' is-loading' : ''}`}>
+              <table className="admin-table admin-reports-table">
+                <thead>
+                  <tr>
+                    <th>Reference</th>
+                    <th>Report</th>
+                    <th>Reporter</th>
+                    <th>Department</th>
+                    <th>Priority</th>
+                    <th>Status</th>
+                    <th>SLA</th>
+                    <th>Submitted</th>
+                    <th aria-label="Actions" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {reports.map((report) => (
+                    <tr key={report.id}>
+                      <td><span className="admin-reference">{report.reference}</span></td>
+                      <td>
+                        <Link to={`/admin/reports/${report.reference}`} className="admin-report-link">
+                          {report.title}
+                        </Link>
+                        <small>{report.category}{report.location ? ` · ${report.location}` : ''}</small>
+                      </td>
+                      <td>
+                        {report.reporter?.name ?? 'Unknown'}
+                        <small>{report.reporter?.email ?? 'No email'}</small>
+                      </td>
+                      <td>
+                        {report.department?.name ?? <span className="admin-muted">Unassigned</span>}
+                        <small>{report.assignedTo?.name ? `Assigned to ${report.assignedTo.name}` : 'No assignee'}</small>
+                      </td>
+                      <td><PriorityBadge priority={report.priority} /></td>
+                      <td><StatusBadge status={report.status} /></td>
+                      <td>
+                        {report.slaDeadline ? (
+                          <span className={report.isOverdue ? 'admin-sla overdue' : 'admin-sla'}>
+                            {formatRelative(report.slaDeadline)}
+                          </span>
+                        ) : <span className="admin-muted">Not set</span>}
+                        {report.slaDeadline && <small>{formatDateTime(report.slaDeadline)}</small>}
+                      </td>
+                      <td>
+                        <span title={formatDateTime(report.createdAt)}>{formatRelative(report.createdAt)}</span>
+                      </td>
+                      <td>
+                        <Link
+                          to={`/admin/reports/${report.reference}`}
+                          className="admin-row-action"
+                          aria-label={`Open ${report.reference}`}
+                        >
+                          <i className="bi bi-arrow-up-right" aria-hidden="true" />
+                        </Link>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
 
+            <Pagination meta={meta} onPageChange={setPage} />
+          </>
+        )}
+      </section>
     </div>
   )
 }
